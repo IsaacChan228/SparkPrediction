@@ -187,11 +187,26 @@ def detect_corrupted_row(row: object, expected_fields: Sequence[str]) -> List[st
     if not _PARENT_PROD_ID_RE.fullmatch(str(parent_prod_id).strip()):
         problems.append("parent_prod_id malformed")
 
-    votes = row_values[7]
+    # Normalize negative votes to 0 instead of treating the row as corrupted.
+    try:
+        votes_idx = expected_fields.index("votes")
+    except ValueError:
+        votes_idx = 7
+
+    votes = row_values[votes_idx] if len(row_values) > votes_idx else ""
     try:
         votes_value = int(str(votes).strip())
         if votes_value < 0:
-            problems.append("votes negative")
+            # mutate mapping or positional values so downstream logic sees 0
+            if isinstance(row, Mapping):
+                try:
+                    if isinstance(row, dict):
+                        row[expected_fields[votes_idx]] = "0"
+                except Exception:
+                    pass
+            else:
+                row_values[votes_idx] = "0"
+            votes_value = 0
     except (ValueError, TypeError):
         problems.append("votes not integer")
 
