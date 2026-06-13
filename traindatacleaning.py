@@ -1,197 +1,220 @@
-"""Utilities for detecting corrupted rows in the training CSV.
+"""Training-data cleaning utilities.
 
-Functions expect a mapping-like row (e.g. csv.DictReader row, dict or pyspark Row
-converted to dict). The main function `detect_corrupted_row` returns a list of
-problem descriptions (empty list means the row appears valid).
+This module reads the canonical schema from
+``training_data/training_data_format`` and uses it to detect corrupted rows in
+``train.csv``. A row is considered corrupted when it has:
+
+* fewer attributes than the schema
+* more attributes than the schema
+* any empty attribute value
+
+When duplicate ``id`` values appear, the first row keeps its original ``id``
+and later rows are reassigned new numeric ``id`` values from the end of the
+original id range so normal records keep their ids unchanged.
+
+The main cleaning helper can be used before training to write a filtered CSV
+containing only valid rows.
 """
-import re
-import time
+
+from __future__ import annotations
+
 import csv
-import os
-from typing import Mapping, Iterable, List, Tuple
+import re
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass
+from pathlib import Path
+from itertools import repeat
+from typing import Iterable, Iterator, List, Sequence, Tuple
 
 
-_USER_ID_RE = re.compile(r"^u_[A-Za-z0-9]{16}$")
-_PROD_ID_RE = re.compile(r"^a_[A-Za-z0-9]{16}$")
+DEFAULT_TRAIN_PATH = Path("training_data/train.csv")
+DEFAULT_SCHEMA_PATH = Path("training_data/training_data_format")
+DEFAULT_CLEAN_TRAIN_PATH = Path("training_data/train_clean.csv")
+CSV_ENCODING = "latin1"
+
+_FIELD_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
-def corrupted_data_handling(csv_path: str = "training_data/train.csv",
-                            output_path: str = "prediction_output/corrupt_data.txt",
-                            max_write: int = None) -> int:
-    """Read a CSV file, detect corrupted rows, and write them to a text file.
+@dataclass(frozen=True)
+class CleaningResult:
+    """Summary of a cleaning run."""
 
-    Returns the total number of rows detected as corrupted.
+    input_rows: int
+    clean_rows: int
+    corrupted_rows: int
+    output_path: Path
 
-    Args:
-        csv_path: Input CSV file path.
-        output_path: Output text file path (will be overwritten).
-        max_write: If specified, limit the number of corrupted rows written.
-    """
-    if not os.path.exists(csv_path):
-        raise FileNotFoundError(f"CSV not found: {csv_path}")
 
-    out_dir = os.path.dirname(output_path)
-    if out_dir and not os.path.exists(out_dir):
-        os.makedirs(out_dir, exist_ok=True)
+def _detect_corrupted_row_worker(args: Tuple[Sequence[str], Sequence[str]]) -> List[str]:
+    """Worker wrapper for parallel row validation."""
 
-    written = 0
-    total_corrupt = 0
-    with open(csv_path, encoding="utf-8") as inf, open(output_path, "w", encoding="utf-8") as outf:
-        reader = csv.DictReader(inf)
-        for i, row in enumerate(reader):
-            problems = detect_corrupted_row(row)
-            if problems:
-                total_corrupt += 1
-                if max_write is None or written < max_write:
-                    # human-readable line
-                    preview = {
-                        "id": row.get("id"),
-                        "user_id": row.get("user_id"),
-                        "prod_id": row.get("prod_id"),
-                        "rating": row.get("rating"),
-                        "votes": row.get("votes"),
-                        "time": row.get("time"),
-                        "purchased": row.get("purchased")
-                    }
-                    outf.write(f"Index: {i}; Id: {row.get('id')}; Problems: {', '.join(problems)}\n")
-                    outf.write(f"Preview: {preview}\n")
-                    outf.write("---\n")
-                    written += 1
-    return total_corrupt
+    row, expected_fields = args
+    return detect_corrupted_row(row, expected_fields)
 
-def detect_corrupted_row(row: Mapping) -> List[str]:
-    """Check a single row for invalid/corrupted fields.
 
-    Validation is performed according to the README field descriptions.
+def load_expected_fields(schema_path: Path | str = DEFAULT_SCHEMA_PATH) -> List[str]:
+    """Read the expected training columns from the schema file."""
 
-    Returns a list of problem descriptions; empty list means the row appears valid.
+    schema_path = Path(schema_path)
+    if not schema_path.exists():
+        raise FileNotFoundError(f"Schema file not found: {schema_path}")
 
-    Args:
-        row: A dict-like object supporting row.get('field').
-    """
-    problems: List[str] = []
-
-    # If any cell in the row is missing or empty, mark the row corrupted.
-    # Ignore empty header names that can occur from trailing commas in CSV files.
-    # Allow missing `comment` (we'll normalize it later).
-    for key in row:
-        if not key:
-            continue
-        val = row.get(key)
-        if val is None or (isinstance(val, str) and val.strip() == ""):
-            if key == "comment":
+    fields: List[str] = []
+    with schema_path.open(encoding="utf-8") as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line or ":" not in line:
                 continue
-            problems.append(f"{key} missing/empty")
+
+            field_name = line.split(":", 1)[0].strip()
+            if _FIELD_NAME_RE.fullmatch(field_name):
+                fields.append(field_name)
+
+    if not fields:
+        raise ValueError(f"No training fields found in schema file: {schema_path}")
+
+    return fields
+
+
+def detect_corrupted_row(row: Sequence[str], expected_fields: Sequence[str]) -> List[str]:
+    """Return a list of corruption reasons for a parsed CSV row.
+
+    The row is treated as corrupted when its attribute count does not match the
+    schema or any attribute is blank.
+    """
+
+    problems: List[str] = []
+    expected_count = len(expected_fields)
+
+    if len(row) < expected_count:
+        problems.append("missing attribute")
+    if len(row) > expected_count:
+        problems.append("extra attribute")
+
     if problems:
         return problems
 
-    # id: numeric
-    _id = row.get("id")
-    try:
-        int(_id)
-    except Exception:
-        problems.append("id not integer")
-
-    # user_id
-    user_id = row.get("user_id")
-    if not user_id or not _USER_ID_RE.match(user_id):
-        problems.append("user_id malformed")
-
-    # prod_id, parent_prod_id
-    for fld in ("prod_id", "parent_prod_id"):
-        v = row.get(fld)
-        if not v or not _PROD_ID_RE.match(v):
-            problems.append(f"{fld} malformed")
-
-    # time: require a non-negative integer
-    t = row.get("time")
-    try:
-        t_val = int(t)
-        if t_val < 0:
-            problems.append("time negative")
-    except Exception:
-        problems.append("time not integer")
-
-    # votes: non-negative integer
-    votes = row.get("votes")
-    try:
-        v = int(votes)
-        if v < 0:
-            problems.append("votes negative")
-    except Exception:
-        problems.append("votes not integer")
-
-    # purchased: must be the exact strings "TRUE" or "FALSE"
-    purchased = row.get("purchased")
-    if not (isinstance(purchased, str) and purchased.strip() in ("TRUE", "FALSE")):
-        problems.append("purchased not TRUE/FALSE")
-
-    # rating: integer 1..5
-    rating = row.get("rating")
-    try:
-        r = int(rating)
-        if r < 1 or r > 5:
-            problems.append("rating out of 1..5")
-    except Exception:
-        problems.append("rating not integer")
-
-    # title/comment: sanitize control characters by replacing them with spaces.
-    # Allow TAB/LF/CR; replace other C0 control chars (code < 32) with space.
-    def _replace_control_chars(s: str) -> str:
-        out = []
-        for ch in s:
-            code = ord(ch)
-            if code < 32 and ch not in ("\t", "\n", "\r"):
-                out.append(" ")
-            else:
-                out.append(ch)
-        return "".join(out)
-
-    title = row.get("title")
-    comment = row.get("comment")
-
-    # Normalize comment: set to "NA" if missing/empty
-    if comment is None or (isinstance(comment, str) and comment.strip() == ""):
-        try:
-            row["comment"] = "NA"
-        except Exception:
-            pass
-        comment = "NA"
-
-    # Replace control chars in title and comment (update row when possible)
-    if title is not None:
-        t_s = _replace_control_chars(str(title))
-        try:
-            row["title"] = t_s
-        except Exception:
-            pass
-        title = t_s
-
-    if comment is not None:
-        c_s = _replace_control_chars(str(comment))
-        try:
-            row["comment"] = c_s
-        except Exception:
-            pass
-        comment = c_s
-
-    # Title must be present after sanitization
-    if title is None or (isinstance(title, str) and title.strip() == ""):
-        problems.append("title missing")
+    for field_name, value in zip(expected_fields, row):
+        if value is None or str(value).strip() == "":
+            problems.append(f"{field_name} missing attribute")
+            break
 
     return problems
 
 
-def detect_corrupted_rows(rows: Iterable[Mapping]) -> List[Tuple[int, List[str]]]:
-    """Check a sequence of rows and return a list of (index, problems).
+def iter_clean_rows(
+    csv_path: Path | str = DEFAULT_TRAIN_PATH,
+    schema_path: Path | str = DEFAULT_SCHEMA_PATH,
+) -> Iterator[List[str]]:
+    """Yield only rows that match the training schema exactly."""
 
-    Index is the 0-based position in the input sequence.
-    """
-    out: List[Tuple[int, List[str]]] = []
-    for i, row in enumerate(rows):
-        problems = detect_corrupted_row(row)
+    expected_fields = load_expected_fields(schema_path)
+    csv_path = Path(csv_path)
+    if not csv_path.exists():
+        raise FileNotFoundError(f"Training CSV not found: {csv_path}")
+
+    with csv_path.open(encoding=CSV_ENCODING, newline="") as handle:
+        reader = csv.reader(handle)
+        next(reader, None)  # ignore the header completely
+        for row in reader:
+            if not detect_corrupted_row(row, expected_fields):
+                yield row
+
+
+def clean_training_csv(
+    csv_path: Path | str = DEFAULT_TRAIN_PATH,
+    schema_path: Path | str = DEFAULT_SCHEMA_PATH,
+    output_path: Path | str = DEFAULT_CLEAN_TRAIN_PATH,
+    max_workers: int | None = None,
+) -> CleaningResult:
+    """Write a cleaned training CSV that excludes corrupted rows."""
+
+    expected_fields = load_expected_fields(schema_path)
+    csv_path = Path(csv_path)
+    output_path = Path(output_path)
+
+    if not csv_path.exists():
+        raise FileNotFoundError(f"Training CSV not found: {csv_path}")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    input_rows = 0
+    clean_rows = 0
+    corrupted_rows = 0
+
+    with csv_path.open(encoding=CSV_ENCODING, newline="") as input_handle:
+        reader = csv.reader(input_handle)
+        next(reader, None)  # skip header; schema comes from training_data_format
+        rows = list(reader)
+
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        problems_list = list(
+            executor.map(
+                _detect_corrupted_row_worker,
+                zip(rows, repeat(expected_fields)),
+                chunksize=256,
+            )
+        )
+
+    max_original_id = 0
+    for row, problems in zip(rows, problems_list):
         if problems:
-            out.append((i, problems))
-    return out
+            continue
+        try:
+            row_id = int(row[0])
+        except (ValueError, TypeError):
+            continue
+        if row_id > max_original_id:
+            max_original_id = row_id
+
+    next_new_id = max_original_id + 1
+    seen_original_ids: set[int] = set()
+
+    with output_path.open("w", encoding="utf-8", newline="") as output_handle:
+        writer = csv.writer(output_handle)
+        writer.writerow(expected_fields)
+
+        for row, problems in zip(rows, problems_list):
+            input_rows += 1
+            if problems:
+                corrupted_rows += 1
+                continue
+
+            try:
+                row_id = int(row[0])
+            except (ValueError, TypeError):
+                corrupted_rows += 1
+                continue
+
+            if row_id in seen_original_ids:
+                row_id = next_new_id
+                next_new_id += 1
+
+            seen_original_ids.add(int(row[0]))
+            row = [str(row_id), *row[1:]]
+
+            writer.writerow(row)
+            clean_rows += 1
+
+    return CleaningResult(
+        input_rows=input_rows,
+        clean_rows=clean_rows,
+        corrupted_rows=corrupted_rows,
+        output_path=output_path,
+    )
 
 
+def main() -> None:
+    """CLI entry point for cleaning training data."""
+
+    result = clean_training_csv()
+    print(
+        "Cleaned training data: "
+        f"{result.clean_rows} valid rows, "
+        f"{result.corrupted_rows} corrupted rows removed, "
+        f"output written to {result.output_path}"
+    )
+
+
+if __name__ == "__main__":
+    main()
