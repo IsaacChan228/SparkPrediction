@@ -14,6 +14,51 @@ from typing import Mapping, Iterable, List, Tuple
 _USER_ID_RE = re.compile(r"^u_[A-Za-z0-9]{16}$")
 _PROD_ID_RE = re.compile(r"^a_[A-Za-z0-9]{16}$")
 
+
+def corrupted_data_handling(csv_path: str = "training_data/train.csv",
+                            output_path: str = "prediction_output/corrupt_rows.txt",
+                            max_write: int = None) -> int:
+    """Read a CSV file, detect corrupted rows, and write them to a text file.
+
+    Returns the total number of rows detected as corrupted.
+
+    Args:
+        csv_path: Input CSV file path.
+        output_path: Output text file path (will be overwritten).
+        max_write: If specified, limit the number of corrupted rows written.
+    """
+    if not os.path.exists(csv_path):
+        raise FileNotFoundError(f"CSV not found: {csv_path}")
+
+    out_dir = os.path.dirname(output_path)
+    if out_dir and not os.path.exists(out_dir):
+        os.makedirs(out_dir, exist_ok=True)
+
+    written = 0
+    total_corrupt = 0
+    with open(csv_path, encoding="utf-8") as inf, open(output_path, "w", encoding="utf-8") as outf:
+        reader = csv.DictReader(inf)
+        for i, row in enumerate(reader):
+            problems = detect_corrupted_row(row)
+            if problems:
+                total_corrupt += 1
+                if max_write is None or written < max_write:
+                    # human-readable line
+                    preview = {
+                        "id": row.get("id"),
+                        "user_id": row.get("user_id"),
+                        "prod_id": row.get("prod_id"),
+                        "rating": row.get("rating"),
+                        "votes": row.get("votes"),
+                        "time": row.get("time"),
+                        "purchased": row.get("purchased")
+                    }
+                    outf.write(f"Index: {i}; Id: {row.get('id')}; Problems: {', '.join(problems)}\n")
+                    outf.write(f"Preview: {preview}\n")
+                    outf.write("---\n")
+                    written += 1
+    return total_corrupt
+
 def detect_corrupted_row(row: Mapping) -> List[str]:
     """Check a single row for invalid/corrupted fields.
 
@@ -111,46 +156,3 @@ def detect_corrupted_rows(rows: Iterable[Mapping]) -> List[Tuple[int, List[str]]
     return out
 
 
-def corrupted_data_handling(csv_path: str = "training_data/train.csv",
-                            output_path: str = "prediction_output/corrupt_rows.txt",
-                            max_write: int = None) -> int:
-    """Read a CSV file, detect corrupted rows, and write them to a text file.
-
-    Returns the total number of rows detected as corrupted.
-
-    Args:
-        csv_path: Input CSV file path.
-        output_path: Output text file path (will be overwritten).
-        max_write: If specified, limit the number of corrupted rows written.
-    """
-    if not os.path.exists(csv_path):
-        raise FileNotFoundError(f"CSV not found: {csv_path}")
-
-    out_dir = os.path.dirname(output_path)
-    if out_dir and not os.path.exists(out_dir):
-        os.makedirs(out_dir, exist_ok=True)
-
-    written = 0
-    total_corrupt = 0
-    with open(csv_path, encoding="utf-8") as inf, open(output_path, "w", encoding="utf-8") as outf:
-        reader = csv.DictReader(inf)
-        for i, row in enumerate(reader):
-            problems = detect_corrupted_row(row)
-            if problems:
-                total_corrupt += 1
-                if max_write is None or written < max_write:
-                    # human-readable line
-                    preview = {
-                        "id": row.get("id"),
-                        "user_id": row.get("user_id"),
-                        "prod_id": row.get("prod_id"),
-                        "rating": row.get("rating"),
-                        "votes": row.get("votes"),
-                        "time": row.get("time"),
-                        "purchased": row.get("purchased")
-                    }
-                    outf.write(f"Index: {i}; Id: {row.get('id')}; Problems: {', '.join(problems)}\n")
-                    outf.write(f"Preview: {preview}\n")
-                    outf.write("---\n")
-                    written += 1
-    return total_corrupt
