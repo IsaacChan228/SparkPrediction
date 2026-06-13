@@ -1,0 +1,10 @@
+	profInfo.csv data format:
+	
+	id: unique numeric identifier for each row
+	parent_prod_id: Parent ID of the product (category of the product) (a_yyyy, where yyyy is a 16-digit combination of letters and numbers)
+	main_category: the category of the product
+	price: the price of the product
+	title: name of the product
+	features: description of the product
+	store: the store selling the product
+	rating_number: number of ratings received for this product (non-negative integer)
