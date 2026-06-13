@@ -16,7 +16,7 @@ _PROD_ID_RE = re.compile(r"^a_[A-Za-z0-9]{16}$")
 
 
 def corrupted_data_handling(csv_path: str = "training_data/train.csv",
-                            output_path: str = "prediction_output/corrupt_rows.txt",
+                            output_path: str = "prediction_output/corrupt_data.txt",
                             max_write: int = None) -> int:
     """Read a CSV file, detect corrupted rows, and write them to a text file.
 
@@ -71,6 +71,14 @@ def detect_corrupted_row(row: Mapping) -> List[str]:
     """
     problems: List[str] = []
 
+    # If any cell in the row is missing or empty, mark the row corrupted.
+    for key in row:
+        val = row.get(key)
+        if val is None or (isinstance(val, str) and val.strip() == ""):
+            problems.append(f"{key} missing/empty")
+    if problems:
+        return problems
+
     # id: numeric
     _id = row.get("id")
     try:
@@ -89,16 +97,12 @@ def detect_corrupted_row(row: Mapping) -> List[str]:
         if not v or not _PROD_ID_RE.match(v):
             problems.append(f"{fld} malformed")
 
-    # time: numeric/timestamp plausible range
+    # time: require a non-negative integer
     t = row.get("time")
     try:
         t_val = int(t)
-        # accept Unix seconds (~1e9) or milliseconds (~1e12)
-        now = int(time.time())
-        # plausible if in seconds within +/-1 year, or milliseconds within +/-1 year
-        secs = t_val if t_val < 1e11 else t_val // 1000
-        if not (1_000_000_000 <= secs <= now + 60 * 60 * 24 * 365):
-            problems.append("time out of plausible range")
+        if t_val < 0:
+            problems.append("time negative")
     except Exception:
         problems.append("time not integer")
 
@@ -111,13 +115,10 @@ def detect_corrupted_row(row: Mapping) -> List[str]:
     except Exception:
         problems.append("votes not integer")
 
-    # purchased: TRUE/FALSE (case-insensitive)
+    # purchased: must be the exact strings "TRUE" or "FALSE"
     purchased = row.get("purchased")
-    if isinstance(purchased, bool):
-        pass
-    else:
-        if not (isinstance(purchased, str) and purchased.strip().lower() in ("true", "false")):
-            problems.append("purchased not boolean-like")
+    if not (isinstance(purchased, str) and purchased.strip() in ("TRUE", "FALSE")):
+        problems.append("purchased not TRUE/FALSE")
 
     # rating: integer 1..5
     rating = row.get("rating")
