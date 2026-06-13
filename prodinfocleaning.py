@@ -60,10 +60,10 @@ def detect_corrupted_row(row: object, expected_fields: Sequence[str]) -> List[st
         if problems:
             return problems
 
-    # basic emptiness check. Allow empty `price` and `main_category` and
-    # normalize them to "NA".
+    # basic emptiness check. Allow empty `price`, `main_category`, and `store`
+    # and normalize them to "NA".
     for idx, (field_name, value) in enumerate(zip(expected_fields, row_values)):
-        if field_name in {"price", "main_category"}:
+        if field_name in {"price", "main_category", "store"}:
             if value is None or str(value).strip() == "":
                 try:
                     if isinstance(row, Mapping):
@@ -192,8 +192,8 @@ def clean_prod_csv(
             if store_idx is not None and len(row) > store_idx:
                 row[store_idx] = _sanitize_text_field(row[store_idx])
 
-            # normalize empty price and main_category to "NA"
-            for field_name in ("price", "main_category"):
+            # normalize empty price, main_category, and store to "NA"
+            for field_name in ("price", "main_category", "store"):
                 try:
                     field_idx = expected_fields.index(field_name)
                 except ValueError:
