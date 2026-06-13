@@ -30,9 +30,13 @@ from typing import Iterable, Iterator, List, Sequence, Tuple
 DEFAULT_TRAIN_PATH = Path("training_data/train.csv")
 DEFAULT_SCHEMA_PATH = Path("training_data/training_data_format")
 DEFAULT_CLEAN_TRAIN_PATH = Path("training_data/train_clean.csv")
-CSV_ENCODING = "latin1"
+CSV_ENCODING = "utf-8"
+CSV_ERRORS = "replace"
 
 _FIELD_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_USER_ID_RE = re.compile(r"^u_[A-Za-z0-9]{16}$")
+_PROD_ID_RE = re.compile(r"^a_[A-Za-z0-9]{16}$")
+_PARENT_PROD_ID_RE = re.compile(r"^a_[A-Za-z0-9]{16}$")
 
 
 @dataclass(frozen=True)
@@ -50,6 +54,19 @@ def _detect_corrupted_row_worker(args: Tuple[Sequence[str], Sequence[str]]) -> L
 
     row, expected_fields = args
     return detect_corrupted_row(row, expected_fields)
+
+
+def _sanitize_text_field(value: str) -> str:
+    """Replace undecodable or invalid text markers with spaces."""
+
+    cleaned = []
+    for ch in str(value):
+        codepoint = ord(ch)
+        if ch == "\ufffd" or 0xD800 <= codepoint <= 0xDFFF or codepoint < 32:
+            cleaned.append(" ")
+        else:
+            cleaned.append(ch)
+    return "".join(cleaned)
 
 
 def load_expected_fields(schema_path: Path | str = DEFAULT_SCHEMA_PATH) -> List[str]:
@@ -99,6 +116,41 @@ def detect_corrupted_row(row: Sequence[str], expected_fields: Sequence[str]) -> 
             problems.append(f"{field_name} missing attribute")
             break
 
+    if problems:
+        return problems
+
+    user_id = row[1]
+    if not _USER_ID_RE.fullmatch(str(user_id).strip()):
+        problems.append("user_id malformed")
+
+    prod_id = row[2]
+    if not _PROD_ID_RE.fullmatch(str(prod_id).strip()):
+        problems.append("prod_id malformed")
+
+    parent_prod_id = row[3]
+    if not _PARENT_PROD_ID_RE.fullmatch(str(parent_prod_id).strip()):
+        problems.append("parent_prod_id malformed")
+
+    votes = row[7]
+    try:
+        votes_value = int(str(votes).strip())
+        if votes_value < 0:
+            problems.append("votes negative")
+    except (ValueError, TypeError):
+        problems.append("votes not integer")
+
+    purchased = str(row[8]).strip()
+    if purchased not in {"TRUE", "FALSE"}:
+        problems.append("purchased malformed")
+
+    rating = row[9]
+    try:
+        rating_value = int(str(rating).strip())
+        if rating_value < 1 or rating_value > 5:
+            problems.append("rating out of range")
+    except (ValueError, TypeError):
+        problems.append("rating not integer")
+
     return problems
 
 
@@ -113,7 +165,7 @@ def iter_clean_rows(
     if not csv_path.exists():
         raise FileNotFoundError(f"Training CSV not found: {csv_path}")
 
-    with csv_path.open(encoding=CSV_ENCODING, newline="") as handle:
+    with csv_path.open(encoding=CSV_ENCODING, errors=CSV_ERRORS, newline="") as handle:
         reader = csv.reader(handle)
         next(reader, None)  # ignore the header completely
         for row in reader:
@@ -142,7 +194,7 @@ def clean_training_csv(
     clean_rows = 0
     corrupted_rows = 0
 
-    with csv_path.open(encoding=CSV_ENCODING, newline="") as input_handle:
+    with csv_path.open(encoding=CSV_ENCODING, errors=CSV_ERRORS, newline="") as input_handle:
         reader = csv.reader(input_handle)
         next(reader, None)  # skip header; schema comes from training_data_format
         rows = list(reader)
@@ -191,6 +243,8 @@ def clean_training_csv(
                 next_new_id += 1
 
             seen_original_ids.add(int(row[0]))
+            row[4] = _sanitize_text_field(row[4])
+            row[5] = _sanitize_text_field(row[5])
             row = [str(row_id), *row[1:]]
 
             writer.writerow(row)
