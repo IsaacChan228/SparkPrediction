@@ -16,15 +16,15 @@ _PROD_ID_RE = re.compile(r"^a_[A-Za-z0-9]{16}$")
 
 
 def corrupted_data_handling(csv_path: str = "training_data/train.csv",
-                            output_path: str = "prediction_output/corrupt_training_data.csv",
+                            output_path: str = "prediction_output/corrupt_data.txt",
                             max_write: int = None) -> int:
-    """Read a CSV file, detect corrupted rows, and write them to `output_path`.
+    """Read a CSV file, detect corrupted rows, and write them to a text file.
 
     Returns the total number of rows detected as corrupted.
 
     Args:
         csv_path: Input CSV file path.
-        output_path: CSV path to write corrupted rows.
+        output_path: Output text file path (will be overwritten).
         max_write: If specified, limit the number of corrupted rows written.
     """
     if not os.path.exists(csv_path):
@@ -36,32 +36,27 @@ def corrupted_data_handling(csv_path: str = "training_data/train.csv",
 
     written = 0
     total_corrupt = 0
-
-    with open(csv_path, encoding="utf-8") as inf:
+    with open(csv_path, encoding="utf-8") as inf, open(output_path, "w", encoding="utf-8") as outf:
         reader = csv.DictReader(inf)
-
-        # prepare CSV writer for corrupt rows
-        csv_outf = open(output_path, "w", encoding="utf-8", newline="")
-        try:
-            base_fields = list(reader.fieldnames) if reader.fieldnames else []
-            out_fields = base_fields + ["problems"]
-            csv_writer = csv.DictWriter(csv_outf, fieldnames=out_fields)
-            if out_fields:
-                csv_writer.writeheader()
-
-            for i, row in enumerate(reader):
-                problems = detect_corrupted_row(row)
-                if problems:
-                    total_corrupt += 1
-                    if max_write is None or written < max_write:
-                        # write the row to CSV for inspection, include problems
-                        out_row = {k: row.get(k) for k in base_fields}
-                        out_row["problems"] = "; ".join(problems)
-                        csv_writer.writerow(out_row)
-                        written += 1
-        finally:
-            csv_outf.close()
-
+        for i, row in enumerate(reader):
+            problems = detect_corrupted_row(row)
+            if problems:
+                total_corrupt += 1
+                if max_write is None or written < max_write:
+                    # human-readable line
+                    preview = {
+                        "id": row.get("id"),
+                        "user_id": row.get("user_id"),
+                        "prod_id": row.get("prod_id"),
+                        "rating": row.get("rating"),
+                        "votes": row.get("votes"),
+                        "time": row.get("time"),
+                        "purchased": row.get("purchased")
+                    }
+                    outf.write(f"Index: {i}; Id: {row.get('id')}; Problems: {', '.join(problems)}\n")
+                    outf.write(f"Preview: {preview}\n")
+                    outf.write("---\n")
+                    written += 1
     return total_corrupt
 
 def detect_corrupted_row(row: Mapping) -> List[str]:
@@ -77,7 +72,8 @@ def detect_corrupted_row(row: Mapping) -> List[str]:
     problems: List[str] = []
 
     # If any cell in the row is missing or empty, mark the row corrupted.
-    # Ignore empty header names (from trailing commas) and allow missing `comment`.
+    # Ignore empty header names that can occur from trailing commas in CSV files.
+    # Allow missing `comment` (we'll normalize it later).
     for key in row:
         if not key:
             continue
@@ -127,7 +123,7 @@ def detect_corrupted_row(row: Mapping) -> List[str]:
 
     # purchased: must be the exact strings "TRUE" or "FALSE"
     purchased = row.get("purchased")
-    if not (isinstance(purchased, str) and purchased.strip().upper() in ("TRUE", "FALSE")):
+    if not (isinstance(purchased, str) and purchased.strip() in ("TRUE", "FALSE")):
         problems.append("purchased not TRUE/FALSE")
 
     # rating: integer 1..5
@@ -139,7 +135,8 @@ def detect_corrupted_row(row: Mapping) -> List[str]:
     except Exception:
         problems.append("rating not integer")
 
-    # title/comment: sanitize control characters by replacing them with spaces
+    # title/comment: sanitize control characters by replacing them with spaces.
+    # Allow TAB/LF/CR; replace other C0 control chars (code < 32) with space.
     def _replace_control_chars(s: str) -> str:
         out = []
         for ch in s:
@@ -150,8 +147,18 @@ def detect_corrupted_row(row: Mapping) -> List[str]:
                 out.append(ch)
         return "".join(out)
 
-    # Title must be present after sanitization
     title = row.get("title")
+    comment = row.get("comment")
+
+    # Normalize comment: set to "NA" if missing/empty
+    if comment is None or (isinstance(comment, str) and comment.strip() == ""):
+        try:
+            row["comment"] = "NA"
+        except Exception:
+            pass
+        comment = "NA"
+
+    # Replace control chars in title and comment (update row when possible)
     if title is not None:
         t_s = _replace_control_chars(str(title))
         try:
@@ -159,17 +166,7 @@ def detect_corrupted_row(row: Mapping) -> List[str]:
         except Exception:
             pass
         title = t_s
-    if title is None or (isinstance(title, str) and title.strip() == ""):
-        problems.append("title missing")
 
-    # comment: set to "NA" if missing/empty. Replace control chars in comment
-    comment = row.get("comment")
-    if comment is None or (isinstance(comment, str) and comment.strip() == ""):
-        try:
-            row["comment"] = "NA"
-        except Exception:
-            pass
-        comment = "NA"
     if comment is not None:
         c_s = _replace_control_chars(str(comment))
         try:
@@ -177,7 +174,11 @@ def detect_corrupted_row(row: Mapping) -> List[str]:
         except Exception:
             pass
         comment = c_s
-        
+
+    # Title must be present after sanitization
+    if title is None or (isinstance(title, str) and title.strip() == ""):
+        problems.append("title missing")
+
     return problems
 
 
@@ -192,3 +193,5 @@ def detect_corrupted_rows(rows: Iterable[Mapping]) -> List[Tuple[int, List[str]]
         if problems:
             out.append((i, problems))
     return out
+
+
