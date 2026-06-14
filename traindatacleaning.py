@@ -31,6 +31,7 @@ Corrupted rows are exported to a separate CSV file with detailed corruption reas
 from __future__ import annotations
 
 import csv
+import os
 import re
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
@@ -677,6 +678,59 @@ def clean_training_csv(
 
             seen_original_ids.add(orig_id)
 
+            # Normalize numeric semantic fields in the parent process so
+            # mutations are reflected in the output CSV (workers cannot
+            # modify the parent process memory).
+            try:
+                votes_idx = expected_fields.index("votes")
+            except ValueError:
+                votes_idx = 7
+            try:
+                rating_idx = expected_fields.index("rating")
+            except ValueError:
+                rating_idx = 9
+
+            if isinstance(row, Mapping):
+                # votes: cap negative to 0
+                try:
+                    v = row.get(expected_fields[votes_idx])
+                    if v is not None:
+                        vi = int(str(v).strip())
+                        if vi < 0:
+                            row[expected_fields[votes_idx]] = "0"
+                except Exception:
+                    pass
+
+                # rating: cap to [1,5]
+                try:
+                    r = row.get(expected_fields[rating_idx])
+                    if r is not None:
+                        ri = int(str(r).strip())
+                        if ri < 1:
+                            row[expected_fields[rating_idx]] = "1"
+                        elif ri > 5:
+                            row[expected_fields[rating_idx]] = "5"
+                except Exception:
+                    pass
+            else:
+                # sequence/list row
+                if len(row) > votes_idx:
+                    try:
+                        vi = int(str(row[votes_idx]).strip())
+                        if vi < 0:
+                            row[votes_idx] = "0"
+                    except Exception:
+                        pass
+                if len(row) > rating_idx:
+                    try:
+                        ri = int(str(row[rating_idx]).strip())
+                        if ri < 1:
+                            row[rating_idx] = "1"
+                        elif ri > 5:
+                            row[rating_idx] = "5"
+                    except Exception:
+                        pass
+
             # Sanitize textual fields by name when using mapping
             if isinstance(row, dict):
                 if "title" in row:
@@ -713,8 +767,14 @@ def clean_training_csv(
 
 def main() -> None:
     """CLI entry point for cleaning training data."""
+    # choose half of available CPU cores when possible, otherwise fallback to 1
+    cpu = os.cpu_count()
+    if cpu is None:
+        workers = 1
+    else:
+        workers = max(1, cpu // 2)
 
-    result = clean_training_csv()
+    result = clean_training_csv(max_workers=workers)
     print(
         "Cleaned training data: "
         f"{result.clean_rows} valid rows, "

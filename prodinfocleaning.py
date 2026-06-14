@@ -1,14 +1,34 @@
 """Product-info cleaning utilities.
 
-This module reuses schema-loading and text sanitization helpers from
-`traindatacleaning.py` to validate and clean
-`product_info/prodInfo.csv` according to
-`product_info/prod_info_format`.
+This module reads the canonical schema from
+``product_info/prod_info_format`` and validates rows in
+``product_info/prodInfo.csv``.
+
+Checks performed:
+
+* fewer attributes than the schema
+* more attributes than the schema
+* missing or empty attribute values (except allowed fields)
+* malformed semantic fields:
+    - `id` must be an integer
+    - `parent_prod_id` must match pattern a_[A-Za-z0-9]{16}
+    - `rating_number` must be a non-negative integer
+
+Corrections / normalizations applied:
+
+* Empty `title`, `price`, `main_category`, and `store` fields are set to "NA"
+* Text fields are sanitized to remove undecodable characters
+
+Output:
+The `clean_prod_csv` function writes a cleaned CSV containing valid rows.
+If `DEBUG_EXPORT_CORRUPTED` is True, corrupted rows with reasons are written
+to a separate CSV with suffix "_corrupted.csv".
 """
 
 from __future__ import annotations
 
 import csv
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor
@@ -111,12 +131,26 @@ def detect_corrupted_row(row: object, expected_fields: Sequence[str]) -> List[st
     if not _PARENT_PROD_ID_RE.fullmatch(str(parent).strip()):
         problems.append("parent_prod_id malformed")
 
-    # rating_number integer non-negative
-    rating_num = row_values[7] if len(row_values) > 7 else None
+    # rating_number integer; negative values are normalized to 0
+    try:
+        rating_idx = expected_fields.index("rating_number")
+    except ValueError:
+        rating_idx = 7
+
+    rating_num = row_values[rating_idx] if len(row_values) > rating_idx else None
     try:
         rv = int(str(rating_num).strip())
         if rv < 0:
-            problems.append("rating_number negative")
+            # normalize negative ratings to 0 (mutate mapping or positional)
+            if isinstance(row, Mapping):
+                try:
+                    if isinstance(row, dict):
+                        row[expected_fields[rating_idx]] = "0"
+                except Exception:
+                    pass
+            else:
+                row_values[rating_idx] = "0"
+            rv = 0
     except Exception:
         problems.append("rating_number not integer")
 
@@ -158,10 +192,14 @@ def clean_prod_csv(
             parsed.append("")
         rows.append(parsed)
 
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        problems_list = list(
-            executor.map(_detect_corrupted_row_worker, zip(rows, [expected_fields] * len(rows)), chunksize=256)
-        )
+    if not max_workers or max_workers <= 1:
+        # Synchronous validation to avoid spawning worker processes.
+        problems_list = [detect_corrupted_row(row, expected_fields) for row in rows]
+    else:
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            problems_list = list(
+                executor.map(_detect_corrupted_row_worker, zip(rows, [expected_fields] * len(rows)), chunksize=256)
+            )
 
     input_rows = 0
     clean_rows = 0
@@ -225,6 +263,21 @@ def clean_prod_csv(
                     if row[field_idx] is None or str(row[field_idx]).strip() == "":
                         row[field_idx] = "NA"
 
+            # Ensure rating_number is not negative — cap to 0 in the parent process
+            try:
+                rating_idx = expected_fields.index("rating_number")
+            except ValueError:
+                rating_idx = 7
+
+            if len(row) > rating_idx:
+                try:
+                    rv = int(str(row[rating_idx]).strip())
+                    if rv < 0:
+                        row[rating_idx] = "0"
+                except Exception:
+                    # leave as-is; downstream validation already handled non-integers
+                    pass
+
             writer.writerow(row[: len(expected_fields)])
             clean_rows += 1
 
@@ -235,7 +288,14 @@ def clean_prod_csv(
 
 
 def main() -> None:
-    res = clean_prod_csv()
+    # choose half of available CPU cores when possible, otherwise fallback to 1
+    cpu = os.cpu_count()
+    if cpu is None:
+        workers = 1
+    else:
+        workers = max(1, cpu // 2)
+
+    res = clean_prod_csv(max_workers=workers)
     print(f"Cleaned product data: {res.clean_rows} valid rows, {res.corrupted_rows} corrupted rows removed, output written to {res.output_path}")
 
 

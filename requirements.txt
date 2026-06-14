@@ -1,0 +1,11 @@
+# Runtime requirements for this project.
+# The code uses only Python standard library modules (csv, re, pathlib,
+# concurrent.futures, typing, etc.) so no mandatory external packages are
+# required for Python 3.8+.
+#
+# Optional backports for older Python versions:
+dataclasses; python_version < "3.7"
+typing-extensions; python_version < "3.8"
+
+# To install (if any):
+#   pip install -r requirement.txt
