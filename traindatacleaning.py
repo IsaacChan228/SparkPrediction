@@ -1,19 +1,31 @@
 """Training-data cleaning utilities.
 
-This module reads the canonical schema from
-``training_data/training_data_format`` and uses it to detect corrupted rows in
-``train.csv``. A row is considered corrupted when it has:
+This module reads the canonical schema from ``training_data/training_data_format`` 
+and uses it to detect and clean corrupted rows in ``train.csv``.
+
+Corruption Detection:
+A row is considered corrupted when it has:
 
 * fewer attributes than the schema
 * more attributes than the schema
-* any empty attribute value
+* missing or empty attribute values (except 'comment' field)
+* malformed semantic fields:
+  - user_id: must match pattern u_[A-Za-z0-9]{16}
+  - prod_id: must match pattern a_[A-Za-z0-9]{16}
+  - parent_prod_id: must match pattern a_[A-Za-z0-9]{16}
+  - purchased: must be TRUE or FALSE
+  - rating: must be an integer between 1 and 5
+  - votes: must be a non-negative integer
 
-When duplicate ``id`` values appear, the first row keeps its original ``id``
-and later rows are reassigned new numeric ``id`` values from the end of the
-original id range so normal records keep their ids unchanged.
+Corrections Applied:
+* Negative vote counts are normalized to 0
+* Empty 'comment' fields are normalized to "NA"
+* Misaligned tail fields (comment, time, votes, purchased, rating) are extracted and realigned
+* Extra fields beyond expected count are merged into the comment field
 
-The main cleaning helper can be used before training to write a filtered CSV
-containing only valid rows.
+Output:
+The main cleaning helper writes a filtered CSV containing only valid rows.
+Corrupted rows are exported to a separate CSV file with detailed corruption reasons.
 """
 
 from __future__ import annotations
@@ -56,7 +68,6 @@ class CleaningResult:
 
 def _detect_corrupted_row_worker(args: Tuple[object, Sequence[str]]) -> List[str]:
     """Worker wrapper for parallel row validation.
-
     Accepts either a sequence (list of fields) or a mapping (dict from header
     name to value) as the row input so the parallel worker is tolerant to the
     CSV reader used upstream.
@@ -228,8 +239,13 @@ def detect_corrupted_row(row: object, expected_fields: Sequence[str]) -> List[st
 def iter_clean_rows(
     csv_path: Path | str = DEFAULT_TRAIN_PATH,
     schema_path: Path | str = DEFAULT_SCHEMA_PATH,
+    max_workers: int | None = None,
 ) -> Iterator[List[str]]:
-    """Yield only rows that match the training schema exactly."""
+    """Yield only rows that match the training schema exactly.
+
+    When ``max_workers`` is provided and greater than 1, row validation is
+    performed in parallel using :class:`concurrent.futures.ProcessPoolExecutor`.
+    """
 
     expected_fields = load_expected_fields(schema_path)
     comment_idx = expected_fields.index("comment")
@@ -237,16 +253,45 @@ def iter_clean_rows(
     if not csv_path.exists():
         raise FileNotFoundError(f"Training CSV not found: {csv_path}")
 
-    with csv_path.open(encoding=CSV_ENCODING, errors=CSV_ERRORS, newline="") as handle:
-        reader = csv.reader(handle)
-        next(reader, None)  # ignore the header completely
-        for row in reader:
-            if not detect_corrupted_row(row, expected_fields):
-                # Ensure comment cell exists and normalize empty to "NA"
-                while len(row) <= comment_idx:
-                    row.append("")
-                if row[comment_idx] is None or str(row[comment_idx]).strip() == "":
-                    row[comment_idx] = "NA"
+    # For small/streaming consumption keep the original streaming path when
+    # no parallel workers are requested.
+    if not max_workers or max_workers <= 1:
+        with csv_path.open(encoding=CSV_ENCODING, errors=CSV_ERRORS, newline="") as handle:
+            reader = csv.reader(handle, delimiter=',')
+            next(reader, None)  # ignore the header completely
+            for row in reader:
+                if not detect_corrupted_row(row, expected_fields):
+                    # Ensure comment cell exists and normalize empty to "NA"
+                    while len(row) <= comment_idx:
+                        row.append("")
+                    if row[comment_idx] is None or str(row[comment_idx]).strip() == "":
+                        row[comment_idx] = "NA"
+                    yield row
+
+    else:
+        # Read all rows first so we can validate them in parallel while
+        # preserving original order.
+        rows: List[List[str]] = []
+        with csv_path.open(encoding=CSV_ENCODING, errors=CSV_ERRORS, newline="") as handle:
+            reader = csv.reader(handle, delimiter=',')
+            next(reader, None)
+            for row in reader:
+                rows.append(list(row))
+
+        # Ensure comment cell exists and normalize empty to "NA" up-front
+        for row in rows:
+            while len(row) <= comment_idx:
+                row.append("")
+            if row[comment_idx] is None or str(row[comment_idx]).strip() == "":
+                row[comment_idx] = "NA"
+
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            problems_list = list(
+                executor.map(_detect_corrupted_row_worker, zip(rows, repeat(expected_fields)), chunksize=256)
+            )
+
+        for row, problems in zip(rows, problems_list):
+            if not problems:
                 yield row
 
 
@@ -299,7 +344,7 @@ def clean_training_csv(
             if not chunk:
                 continue
             try:
-                parsed = next(csv.reader([chunk]))
+                parsed = next(csv.reader([chunk], delimiter=','))
             except Exception:
                 parsed = [c for c in chunk.split(",")]
 

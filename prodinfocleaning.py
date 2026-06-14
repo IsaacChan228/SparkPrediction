@@ -30,6 +30,8 @@ DEFAULT_CLEAN_PROD_PATH = Path("product_info/prodInfo_clean.csv")
 
 @dataclass(frozen=True)
 class ProdCleaningResult:
+    """Summary of a product cleaning run."""
+
     input_rows: int
     clean_rows: int
     corrupted_rows: int
@@ -37,11 +39,26 @@ class ProdCleaningResult:
 
 
 def _detect_corrupted_row_worker(args: tuple) -> List[str]:
+    """Worker wrapper for parallel row validation.
+
+    Accepts either a sequence (list of fields) or a mapping (dict from header
+    name to value) as the row input so the parallel worker is tolerant to the
+    CSV reader used upstream.
+    """
     row, expected = args
     return detect_corrupted_row(row, expected)
 
 
 def detect_corrupted_row(row: object, expected_fields: Sequence[str]) -> List[str]:
+    """Return a list of corruption reasons for a parsed CSV row.
+
+    Validates that the row has the correct number of attributes, no missing values
+    (except allowed fields like title, price, main_category, store), proper id format,
+    parent_prod_id format, and rating_number is a non-negative integer.
+    
+    Accepts either a sequence of values (positional CSV row) or a mapping-like
+    object (e.g. `csv.DictReader` row).
+    """
     problems: List[str] = []
     expected_count = len(expected_fields)
 
@@ -112,6 +129,12 @@ def clean_prod_csv(
     output_path: Path | str = DEFAULT_CLEAN_PROD_PATH,
     max_workers: int | None = None,
 ) -> ProdCleaningResult:
+    """Write a cleaned product CSV that excludes corrupted rows.
+    
+    Parses the product CSV, validates each row against the schema using parallel
+    processing, and writes only valid rows to the output file. Optionally exports
+    corrupted rows with corruption reasons to a separate file.
+    """
     expected_fields = load_expected_fields(schema_path)
     csv_path = Path(csv_path)
     output_path = Path(output_path)
@@ -127,7 +150,7 @@ def clean_prod_csv(
         if not line.strip():
             continue
         try:
-            parsed = next(csv.reader([line]))
+            parsed = next(csv.reader([line], delimiter=','))
         except Exception:
             parsed = [c for c in line.split(",")]
         # pad
@@ -152,10 +175,10 @@ def clean_prod_csv(
         corrupted_handle = corrupted_path.open("w", encoding="utf-8", newline="")
 
     with output_path.open("w", encoding="utf-8", newline="") as out:
-        writer = csv.writer(out)
+        writer = csv.writer(out, delimiter=',')
         writer.writerow(expected_fields)
         if corrupted_handle is not None:
-            corrupted_writer = csv.writer(corrupted_handle)
+            corrupted_writer = csv.writer(corrupted_handle, delimiter=',')
             corrupted_writer.writerow([*expected_fields, "corruption_reasons"])
 
         for row, problems in zip(rows, problems_list):
