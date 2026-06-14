@@ -1,6 +1,6 @@
 """Training-data cleaning utilities.
 
-This module reads the canonical schema from ``training_data/training_data_format`` 
+This module reads the canonical schema from ``training_data/training_data_format.cfg`` 
 and uses it to detect and clean corrupted rows in ``train.csv``.
 
 Corruption Detection:
@@ -41,7 +41,7 @@ from typing import Iterable, Iterator, List, Sequence, Tuple, Mapping
 
 
 DEFAULT_TRAIN_PATH = Path("training_data/train.csv")
-DEFAULT_SCHEMA_PATH = Path("training_data/training_data_format")
+DEFAULT_SCHEMA_PATH = Path("training_data/training_data_format.cfg")
 DEFAULT_CLEAN_TRAIN_PATH = Path("training_data/train_clean.csv")
 CSV_ENCODING = "utf-8"
 CSV_ERRORS = "replace"

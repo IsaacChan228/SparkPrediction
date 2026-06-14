@@ -1,8 +1,7 @@
 """Product-info cleaning utilities.
 
-This module reads the canonical schema from
-``product_info/prod_info_format`` and validates rows in
-``product_info/prodInfo.csv``.
+This module reads the canonical schema from ``product_info/prod_info_format.cfg`` 
+and validates rows in ``product_info/prodInfo.csv``.
 
 Checks performed:
 
@@ -44,7 +43,7 @@ from traindatacleaning import (
 
 
 DEFAULT_PROD_PATH = Path("product_info/prodInfo.csv")
-DEFAULT_SCHEMA_PATH = Path("product_info/prod_info_format")
+DEFAULT_SCHEMA_PATH = Path("product_info/prod_info_format.cfg")
 DEFAULT_CLEAN_PROD_PATH = Path("product_info/prodInfo_clean.csv")
 
 

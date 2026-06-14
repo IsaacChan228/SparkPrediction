@@ -1,6 +1,6 @@
 """Prediction-data cleaning utilities.
 
-This module reads the canonical schema from ``prediction_input/prediction_data_format``
+This module reads the canonical schema from ``prediction_input/prediction_data_format.cfg``
 and uses it to detect and clean corrupted rows in ``test.csv`` (prediction set).
 
 Corruption Detection:
@@ -40,7 +40,7 @@ from typing import Iterable, Iterator, List, Sequence, Tuple, Mapping
 
 
 DEFAULT_TRAIN_PATH = Path("prediction_input/test.csv")
-DEFAULT_SCHEMA_PATH = Path("prediction_input/prediction_data_format")
+DEFAULT_SCHEMA_PATH = Path("prediction_input/prediction_data_format.cfg")
 DEFAULT_CLEAN_TRAIN_PATH = Path("prediction_input/test_clean.csv")
 CSV_ENCODING = "utf-8"
 CSV_ERRORS = "replace"
