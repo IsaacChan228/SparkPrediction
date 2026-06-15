@@ -1,6 +1,13 @@
 # Ignore dataset files that shouldn't be committed
 training_data/train.csv
+training_data/train_clean.csv
+training_data/train_clean_corrupted.csv
 product_info/prodInfo.csv
+product_info/prodInfo_clean.csv
+product_info/prodInfo_clean_corrupted.csv
+prediction_input/test.csv
+prediction_input/test_clean.csv
+prediction_input/test_clean_corrupted.csv
 
 # Optional: ignore environment and cache files
 .DS_Store
