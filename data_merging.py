@@ -81,8 +81,16 @@ def merge_train_with_prod(
             writer.writeheader()
 
             for trow in train_reader:
-                key = trow.get("parent_prod_id")
-                prow = prod_map.get(key, {})
+                # Prefer matching the left-side `prod_id` to product `parent_prod_id`.
+                # If that fails, fall back to matching left-side `parent_prod_id`.
+                prod_id = trow.get("prod_id")
+                parent_key = trow.get("parent_prod_id")
+
+                prow = {}
+                if prod_id and prod_id in prod_map:
+                    prow = prod_map[prod_id]
+                elif parent_key and parent_key in prod_map:
+                    prow = prod_map[parent_key]
 
                 out_row = dict(trow)
                 # inject prod fields (prefix keys)
