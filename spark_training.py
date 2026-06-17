@@ -82,14 +82,18 @@ class TabularDataset(Dataset):
 
 
 class MLP(nn.Module):
-    def __init__(self, input_dim: int, hidden: int = 64, out: int = 1):
+    def __init__(self, input_dim: int, hidden1: int = 128, hidden2: int = 64, out: int = 1, dropout: float = 0.2):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden),
+            nn.Linear(input_dim, hidden1),
+            nn.BatchNorm1d(hidden1),
             nn.ReLU(),
-            nn.Linear(hidden, hidden // 2),
+            nn.Dropout(dropout),
+            nn.Linear(hidden1, hidden2),
+            nn.BatchNorm1d(hidden2),
             nn.ReLU(),
-            nn.Linear(hidden // 2, out),
+            nn.Dropout(dropout),
+            nn.Linear(hidden2, out),
         )
 
     def forward(self, x):
@@ -98,52 +102,145 @@ class MLP(nn.Module):
 
 def train_model(
     data: pd.DataFrame,
-    epochs: int = 10,
+    epochs: int = 30,
     batch_size: int = 64,
-    lr: float = 1e-3,
+    lr: float = 3e-4,
     model_path: Path = MODEL_PATH,
+    weight_decay: float = 1e-5,
+    early_stopping_patience: int = 5,
 ) -> Tuple[MLP, dict]:
     X = data[["votes", "purchased", "time", "comment_len"]].values
     y = data["label"].values
 
-    ds = TabularDataset(X, y)
-    dl = DataLoader(ds, batch_size=batch_size, shuffle=True)
+    # 80/20 train/validation split
+    n = len(y)
+    if n == 0:
+        raise ValueError("Empty dataset passed to train_model")
+    perm = np.random.permutation(n)
+    split = int(0.8 * n)
+    split = max(1, min(split, n - 1))
+
+    train_idx = perm[:split]
+    val_idx = perm[split:]
+
+    X_train, y_train = X[train_idx], y[train_idx]
+    X_val, y_val = X[val_idx], y[val_idx]
+
+    # Standardize features using train statistics
+    mean = X_train.mean(axis=0)
+    std = X_train.std(axis=0)
+    std[std == 0] = 1.0
+    X_train = (X_train - mean) / std
+    X_val = (X_val - mean) / std
+
+    train_ds = TabularDataset(X_train, y_train)
+    val_ds = TabularDataset(X_val, y_val)
+    train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
+    val_dl = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = MLP(input_dim=X.shape[1])
     model.to(device)
 
-    opt = torch.optim.Adam(model.parameters(), lr=lr)
-    # Use MSE as the base loss; report RMSE (sqrt of MSE)
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     loss_fn = nn.MSELoss()
 
+    # scheduler and early stopping
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min", patience=3, factor=0.5, verbose=True)
+    best_val_mse = float("inf")
+    best_state: dict | None = None
+    no_improve = 0
+
+    use_amp = torch.cuda.is_available()
+    scaler = torch.cuda.amp.GradScaler() if use_amp else None
     model.train()
     for epoch in range(1, epochs + 1):
         total_loss = 0.0
         total = 0
         abs_err = 0.0
-        for xb, yb in dl:
+        for xb, yb in train_dl:
             xb, yb = xb.to(device), yb.to(device)
-            preds = model(xb).squeeze(1)
-            loss = loss_fn(preds, yb)
             opt.zero_grad()
-            loss.backward()
-            opt.step()
+            if use_amp:
+                with torch.cuda.amp.autocast():
+                    preds = model(xb).squeeze(1)
+                    loss = loss_fn(preds, yb)
+                scaler.scale(loss).backward()
+                # gradient clipping
+                scaler.unscale_(opt)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                scaler.step(opt)
+                scaler.update()
+            else:
+                preds = model(xb).squeeze(1)
+                loss = loss_fn(preds, yb)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                opt.step()
 
-            batch_size_eff = xb.size(0)
-            total_loss += loss.item() * batch_size_eff
+            bs = xb.size(0)
+            total_loss += loss.item() * bs
             abs_err += torch.abs(preds - yb).sum().item()
-            total += batch_size_eff
+            total += bs
 
-        mse = total_loss / max(1, total)
-        rmse = float(np.sqrt(mse))
-        mae = abs_err / max(1, total)
-        print(f"Epoch {epoch}/{epochs}: mse={mse:.4f} rmse={rmse:.4f} mae={mae:.4f}")
+        train_mse = total_loss / max(1, total)
+        train_rmse = float(np.sqrt(train_mse))
+        train_mae = abs_err / max(1, total)
 
+        # Validation pass
+        model.eval()
+        with torch.no_grad():
+            v_loss = 0.0
+            v_total = 0
+            v_abs_err = 0.0
+            for xb, yb in val_dl:
+                xb, yb = xb.to(device), yb.to(device)
+                preds = model(xb).squeeze(1)
+                loss = loss_fn(preds, yb)
+                bs = xb.size(0)
+                v_loss += loss.item() * bs
+                v_abs_err += torch.abs(preds - yb).sum().item()
+                v_total += bs
+
+            val_mse = v_loss / max(1, v_total)
+            val_rmse = float(np.sqrt(val_mse))
+            val_mae = v_abs_err / max(1, v_total)
+
+        print(
+            f"Epoch {epoch}/{epochs}: train_rmse={train_rmse:.4f} train_mae={train_mae:.4f} "
+            f"val_rmse={val_rmse:.4f} val_mae={val_mae:.4f}"
+        )
+
+        # scheduler step (ReduceLROnPlateau expects a metric)
+        scheduler.step(val_mse)
+
+        # checkpoint best model by validation MSE
+        if val_mse < best_val_mse:
+            best_val_mse = val_mse
+            best_state = {k: v.cpu() for k, v in model.state_dict().items()}
+            no_improve = 0
+        else:
+            no_improve += 1
+
+        model.train()
+
+        # early stopping
+        if no_improve >= early_stopping_patience:
+            print(f"Early stopping after {epoch} epochs (no improvement in {no_improve} epochs)")
+            break
+
+    # Save best model and scaler
     model_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(model.state_dict(), str(model_path))
-    print(f"Model saved to {model_path}")
-    return model, {"mse": mse, "rmse": rmse, "mae": mae}
+    if best_state is not None:
+        save_obj = {"model_state": best_state, "scaler": {"mean": mean.tolist(), "std": std.tolist()}}
+        torch.save(save_obj, str(model_path))
+        print(f"Best model (val_mse={best_val_mse:.6f}) saved to {model_path}")
+    else:
+        # fallback: save final state
+        torch.save(model.state_dict(), str(model_path))
+        print(f"Model saved to {model_path}")
+
+    return model, {"train_mse": train_mse, "train_rmse": train_rmse, "train_mae": train_mae, "val_mse": val_mse, "val_rmse": val_rmse, "val_mae": val_mae}
 
 
 def predict_csv(spark: SparkSession, input_csv: str, model_path: Path = MODEL_PATH) -> pd.DataFrame:
@@ -152,9 +249,27 @@ def predict_csv(spark: SparkSession, input_csv: str, model_path: Path = MODEL_PA
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = MLP(input_dim=X.shape[1])
-    model.load_state_dict(torch.load(str(model_path), map_location=device))
+
+    # load model; saved object may contain scaler and model_state
+    loaded = torch.load(str(model_path), map_location=device)
+    scaler = None
+    if isinstance(loaded, dict) and "model_state" in loaded:
+        state = loaded["model_state"]
+        scaler = loaded.get("scaler")
+        model.load_state_dict(state)
+    else:
+        # legacy: state_dict only
+        model.load_state_dict(loaded)
+
     model.to(device)
     model.eval()
+
+    # apply scaler if available
+    if scaler is not None:
+        mean = np.array(scaler.get("mean", 0.0))
+        std = np.array(scaler.get("std", 1.0))
+        std[std == 0] = 1.0
+        X = (X - mean) / std
 
     with torch.no_grad():
         xb = torch.from_numpy(X).float().to(device)
