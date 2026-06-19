@@ -79,13 +79,15 @@ def train_model(
     loss_fn = nn.MSELoss()
 
     # scheduler and early stopping
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min", patience=3, factor=0.5, verbose=True)
+    # Some PyTorch builds don't accept the `verbose` kwarg; omit it for compatibility
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min", patience=3, factor=0.5)
     best_val_mse = float("inf")
     best_state: dict | None = None
     no_improve = 0
 
     use_amp = torch.cuda.is_available()
-    scaler = torch.cuda.amp.GradScaler() if use_amp else None
+    # Use the public torch.amp API (replacement for deprecated torch.cuda.amp)
+    scaler = torch.amp.GradScaler(device_type="cuda") if use_amp else None
     model.train()
     for epoch in range(1, epochs + 1):
         total_loss = 0.0
@@ -95,7 +97,8 @@ def train_model(
             xb, yb = xb.to(device), yb.to(device)
             opt.zero_grad()
             if use_amp:
-                with torch.cuda.amp.autocast():
+                # use torch.amp.autocast for device-aware mixed precision
+                with torch.amp.autocast(device_type="cuda"):
                     preds = model(xb).squeeze(1)
                     loss = loss_fn(preds, yb)
                 scaler.scale(loss).backward()
