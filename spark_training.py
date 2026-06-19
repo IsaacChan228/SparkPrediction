@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Tuple
+from contextlib import nullcontext
 import configparser
 
 import numpy as np
@@ -86,8 +87,21 @@ def train_model(
     no_improve = 0
 
     use_amp = torch.cuda.is_available()
-    # Use the public torch.amp API (replacement for deprecated torch.cuda.amp)
-    scaler = torch.amp.GradScaler(device_type="cuda") if use_amp else None
+    # Create a GradScaler in a way that's compatible across torch versions.
+    # Newer versions accept `device_type="cuda"` or a positional 'cuda' arg;
+    # older versions use torch.cuda.amp.GradScaler(). Try several fallbacks.
+    scaler = None
+    if use_amp:
+        try:
+            scaler = torch.amp.GradScaler(device_type="cuda")
+        except TypeError:
+            try:
+                scaler = torch.amp.GradScaler("cuda")
+            except TypeError:
+                try:
+                    scaler = torch.cuda.amp.GradScaler()
+                except Exception:
+                    scaler = None
     model.train()
     for epoch in range(1, epochs + 1):
         total_loss = 0.0
@@ -97,8 +111,17 @@ def train_model(
             xb, yb = xb.to(device), yb.to(device)
             opt.zero_grad()
             if use_amp:
-                # use torch.amp.autocast for device-aware mixed precision
-                with torch.amp.autocast(device_type="cuda"):
+                # Use autocast in a version-compatible way; default to torch.amp.autocast
+                try:
+                    ac = torch.amp.autocast(device_type="cuda")
+                except TypeError:
+                    try:
+                        ac = torch.amp.autocast("cuda")
+                    except TypeError:
+                        # fallback to the legacy cuda autocast
+                        ac = torch.cuda.amp.autocast()
+
+                with ac:
                     preds = model(xb).squeeze(1)
                     loss = loss_fn(preds, yb)
                 scaler.scale(loss).backward()

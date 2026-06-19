@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+import time
 from torch.utils.data import Dataset
 from pyspark.sql import SparkSession
 import pyspark.sql.functions as F
@@ -135,12 +136,20 @@ class MLP(nn.Module):
 def predict_csv(spark: SparkSession, input_csv: str, model_path: Path = MODEL_PATH) -> pd.DataFrame:
     # Read input and extract features; preserve `id` if present for submission format
     df = spark.read.option("header", True).csv(input_csv)
+    # Sanitize numeric fields similarly to the training preprocessing to
+    # tolerate malformed string values in CSV inputs.
+    votes_clean = F.regexp_replace(F.col("votes"), "[^0-9.\\-]", "")
+    votes_num = F.when(votes_clean.rlike(r"^-?\\d+(\\.\\d+)?$"), votes_clean.cast("double")).otherwise(F.lit(0.0)).alias("votes")
+
+    time_clean = F.regexp_replace(F.col("time"), "[^0-9.\\-]", "")
+    time_num = F.when(time_clean.rlike(r"^-?\\d+(\\.\\d+)?$"), time_clean.cast("double")).otherwise(F.lit(0.0)).alias("time")
+
     df2 = (
         df.select(
             F.col("id").alias("id"),
-            F.col("votes").cast("double").alias("votes"),
+            votes_num,
             (F.when(F.upper(F.col("purchased")) == "TRUE", 1.0).otherwise(0.0)).alias("purchased"),
-            F.col("time").cast("double").alias("time"),
+            time_num,
             F.length(F.col("comment")).cast("double").alias("comment_len"),
         )
         .na.fill({"votes": 0.0, "time": 0.0, "comment_len": 0.0, "purchased": 0.0})
@@ -176,7 +185,9 @@ def predict_csv(spark: SparkSession, input_csv: str, model_path: Path = MODEL_PA
 
     with torch.no_grad():
         xb = torch.from_numpy(X).float().to(device)
+        start = time.perf_counter()
         preds = model(xb).squeeze(1).cpu().numpy()
+        elapsed = time.perf_counter() - start
         preds = np.clip(preds, 1.0, 5.0)
 
     # Round/clamp predictions to integer ratings 1-5
@@ -187,6 +198,11 @@ def predict_csv(spark: SparkSession, input_csv: str, model_path: Path = MODEL_PA
         out = pd.DataFrame({"id": ids.astype(int), "rating": ratings})
     else:
         out = pd.DataFrame({"id": np.arange(len(ratings)), "rating": ratings})
+
+    # Print total and average inference time (do not modify output CSV schema)
+    total = float(elapsed)
+    avg = total / max(1, len(ratings))
+    print(f"Inference total time: {total:.6f}s, average per record: {avg:.6f}s")
 
     return out
 
