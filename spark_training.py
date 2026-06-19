@@ -35,6 +35,60 @@ import pyspark.sql.functions as F
 
 from spark_prediction import MODEL_PATH, get_spark, load_and_preprocess, TabularDataset, MLP, predict_csv
 
+def diagnose_rating_nulls(spark: SparkSession, csv_path: str, limit: int = 50) -> Path | None:
+    """Find rows where raw `rating` exists but cleaning produces NULL.
+
+    Writes up to `limit` sample rows to `artifacts/problematic_ratings_training.txt` and
+    returns the path (or None on error).
+    """
+    out_dir = Path("artifacts")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_file = out_dir / "problematic_ratings_training.txt"
+    try:
+        # use robust CSV options matching training/prediction readers
+        df = (
+            spark.read.option("header", True)
+            .option("nullValue", "NA")
+            .option("treatEmptyValuesAsNulls", "true")
+            .option("encoding", "UTF-8")
+            .option("sep", ",")
+            .option("quote", '"')
+            .option("escape", '"')
+            .option("multiLine", "true")
+            .option("ignoreLeadingWhiteSpace", "true")
+            .option("ignoreTrailingWhiteSpace", "true")
+            .option("mode", "PERMISSIVE")
+            .csv(csv_path)
+        )
+
+        rating_clean = F.when(
+            F.regexp_replace(F.col("rating"), "[^0-9.]", "").rlike(r"^[1-5](\.0+)?$"),
+            F.regexp_replace(F.col("rating"), "[^0-9.]", "").cast("double").cast("int"),
+        ).otherwise(F.lit(None))
+
+        sel = df.select(
+            F.col("rating").alias("raw_rating"),
+            F.col("comment"),
+            F.col("votes"),
+            F.col("time"),
+            rating_clean.alias("clean_rating"),
+        ).where((F.col("raw_rating").isNotNull()) & (rating_clean.isNull()))
+
+        total = sel.count()
+        samples = sel.limit(limit).collect()
+
+        with out_file.open("w", encoding="utf-8") as fh:
+            fh.write(f"Total problematic rows: {total}\n")
+            for r in samples:
+                # write a compact dict of the row fields
+                fh.write(str({k: r[k] for k in r.__fields__}) + "\n")
+
+        print(f"Diagnose: {total} rows where cleaned rating is NULL; samples written to {out_file}")
+        return out_file
+    except Exception as e:
+        print(f"Diagnose failed: {e}")
+        return None
+
 def train_model(
     data: pd.DataFrame,
     epochs: int = 30,
@@ -47,16 +101,7 @@ def train_model(
     X = data[["votes", "purchased", "time", "comment_len"]].values
     y = data["label"].values
 
-    # Diagnostics: print label distribution and basic stats to help debug
-    try:
-        uniq, counts = np.unique(y, return_counts=True)
-        print(f"Label distribution: {dict(zip(uniq.tolist(), counts.tolist()))}")
-        print(f"Label mean={float(np.mean(y)):.4f} std={float(np.std(y)):.4f} n={len(y)}")
-        if len(uniq) == 1:
-            print("WARNING: all labels are identical — model will predict a constant value.")
-    except Exception:
-        # don't fail training for diagnostic printing
-        pass
+    # Diagnostics removed to reduce noisy output
 
     # 80/20 train/validation split
     n = len(y)
@@ -72,43 +117,7 @@ def train_model(
     X_train, y_train = X[train_idx], y[train_idx]
     X_val, y_val = X[val_idx], y[val_idx]
 
-    # Feature diagnostics on raw (pre-standardized) features
-    try:
-        feat_names = ["votes", "purchased", "time", "comment_len"]
-        print("Feature diagnostics (train split):")
-        for i, name in enumerate(feat_names):
-            fmean = float(np.mean(X_train[:, i]))
-            fstd = float(np.std(X_train[:, i]))
-            # correlation with label
-            try:
-                corr = float(np.corrcoef(X_train[:, i], y_train)[0, 1])
-            except Exception:
-                corr = float("nan")
-            # non-zero count and percentiles
-            try:
-                nonzero = int(np.count_nonzero(X_train[:, i]))
-                p25, p50, p75 = np.percentile(X_train[:, i], [25, 50, 75])
-            except Exception:
-                nonzero = 0
-                p25 = p50 = p75 = float("nan")
-            print(
-                f"  {name}: mean={fmean:.4f} std={fstd:.4f} corr_with_label={corr:.4f} "
-                f"nonzero={nonzero}/{len(X_train)} p25={p25:.4f} p50={p50:.4f} p75={p75:.4f}"
-            )
-
-        # Linear least-squares baseline (intercept + linear features)
-        try:
-            X_lin_train = np.concatenate([np.ones((X_train.shape[0], 1)), X_train], axis=1)
-            w, *_ = np.linalg.lstsq(X_lin_train, y_train, rcond=None)
-            X_lin_val = np.concatenate([np.ones((X_val.shape[0], 1)), X_val], axis=1)
-            y_val_pred = X_lin_val.dot(w)
-            lin_mse = float(np.mean((y_val_pred - y_val) ** 2))
-            lin_mae = float(np.mean(np.abs(y_val_pred - y_val)))
-            print(f"Linear baseline on raw features: val_mse={lin_mse:.6f} val_mae={lin_mae:.6f}")
-        except Exception as e:
-            print(f"Linear baseline computation failed: {e}")
-    except Exception:
-        pass
+    # Feature diagnostics and linear baseline removed to quiet output
 
     # Standardize features using train statistics
     mean = X_train.mean(axis=0)
@@ -299,6 +308,12 @@ def load_config(path: str | Path) -> dict:
 
 def main():
     spark = get_spark()
+
+    # Run a quick diagnostic to capture problematic rating rows before preprocessing
+    try:
+        diagnose_rating_nulls(spark, "training_data/train_merged.csv", limit=50)
+    except Exception:
+        pass
 
     cfg = load_config("config.cfg")
 

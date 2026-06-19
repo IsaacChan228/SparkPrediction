@@ -1,16 +1,14 @@
-Preprocessing time (s): 16.172303
-Total training time (s): 1260.124994
-Offline total time (preprocessing + training) (s): 1276.297297
+Preprocessing time (s): 24.495847
+Total training time (s): 921.058460
+Offline total time (preprocessing + training) (s): 945.554307
 
 Per-epoch timing and metrics:
-Epoch 1: time=114.402748s train_rmse=1.4338 val_rmse=1.4137
-Epoch 2: time=113.822526s train_rmse=1.4136 val_rmse=1.4125
-Epoch 3: time=113.518180s train_rmse=1.4129 val_rmse=1.4115
-Epoch 4: time=113.376526s train_rmse=1.4127 val_rmse=1.4138
-Epoch 5: time=113.397839s train_rmse=1.4128 val_rmse=1.4136
-Epoch 6: time=117.274046s train_rmse=1.4127 val_rmse=1.4119
-Epoch 7: time=141.340084s train_rmse=1.4126 val_rmse=1.4109
-Epoch 8: time=142.356567s train_rmse=1.4126 val_rmse=1.4133
-Epoch 9: time=144.886834s train_rmse=1.4126 val_rmse=1.4157
-Epoch 10: time=145.745313s train_rmse=1.4126 val_rmse=1.4258
-Inference: 10000 records, total_time_s=0.103180, avg_time_s=0.000010
+Epoch 1: time=116.073575s train_rmse=1.4328 val_rmse=1.4167
+Epoch 2: time=115.339976s train_rmse=1.4122 val_rmse=1.4115
+Epoch 3: time=115.281666s train_rmse=1.4116 val_rmse=1.4107
+Epoch 4: time=114.885791s train_rmse=1.4114 val_rmse=1.4161
+Epoch 5: time=114.834930s train_rmse=1.4113 val_rmse=1.4146
+Epoch 6: time=114.794235s train_rmse=1.4113 val_rmse=1.4174
+Epoch 7: time=114.996877s train_rmse=1.4113 val_rmse=1.4133
+Epoch 8: time=114.847815s train_rmse=1.4111 val_rmse=1.4128
+Inference: 10000 records, total_time_s=0.110016, avg_time_s=0.000011

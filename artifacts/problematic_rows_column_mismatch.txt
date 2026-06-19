@@ -1,0 +1,5 @@
+Checked file: training_data/train_merged.csv
+Expected columns: 16
+Total rows checked: 3007440
+Bad rows: 0
+

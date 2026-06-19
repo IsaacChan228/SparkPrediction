@@ -68,37 +68,25 @@ def get_spark(app_name: str = "spark-pytorch-mlp") -> SparkSession:
 
 def load_and_preprocess(spark: SparkSession, csv_path: str) -> pd.DataFrame:
     # Treat common textual null markers like 'NA' and empty strings as nulls
+    # Allow quoted fields with embedded newlines and double-quote escaping
     df = (
         spark.read.option("header", True)
         .option("nullValue", "NA")
         .option("treatEmptyValuesAsNulls", "true")
+        .option("encoding", "UTF-8")
+        .option("sep", ",")
+        .option("quote", '"')
+        # CSV standard escapes quotes by doubling them (""), so set escape to '"'
+        .option("escape", '"')
+        # allow multiline fields so comments containing newlines are parsed as single field
+        .option("multiLine", "true")
+        .option("ignoreLeadingWhiteSpace", "true")
+        .option("ignoreTrailingWhiteSpace", "true")
+        .option("mode", "PERMISSIVE")
         .csv(csv_path)
     )
 
-    # Diagnostic: show raw data sample and null/NA counts to debug missing features
-    try:
-        cols = ["votes", "time", "purchased", "comment", "rating"]
-        print("Raw sample rows (first 10) for columns:", cols)
-        df.select(*cols).show(10, truncate=False)
-
-        null_counts_row = df.select([F.count(F.when(F.col(c).isNull(), c)).alias(c) for c in cols]).collect()[0]
-        print("Null counts:")
-        for c in cols:
-            print(f"  {c}: {null_counts_row[c]}")
-
-        # Count literal 'NA' strings (if treatEmptyValuesAsNulls didn't catch them)
-        na_counts = df.select([F.count(F.when(F.col(c) == "NA", c)).alias(c) for c in cols]).collect()[0]
-        print("Literal 'NA' counts:")
-        for c in cols:
-            print(f"  {c}: {na_counts[c]}")
-
-        # Show a few non-null examples for votes/time if present
-        print("Examples of non-null 'votes' values:")
-        df.select("votes").where(F.col("votes").isNotNull()).limit(10).show(truncate=False)
-        print("Examples of non-null 'time' values:")
-        df.select("time").where(F.col("time").isNotNull()).limit(10).show(truncate=False)
-    except Exception:
-        pass
+    # Diagnostics removed to reduce noisy output
 
     # Basic feature engineering: votes, purchased, time, comment length
     # Sanitize numeric input before casting to avoid failures when fields contain
@@ -124,6 +112,8 @@ def load_and_preprocess(spark: SparkSession, csv_path: str) -> pd.DataFrame:
         )
         .na.fill({"votes": 0.0, "time": 0.0, "comment_len": 0.0, "purchased": 0.0})
     )
+
+    # Removed cleaned-rating distribution diagnostics
 
     pdf = df2.toPandas()
     # Drop rows without label and make an explicit copy to avoid chained-assignment warnings
@@ -169,10 +159,19 @@ class MLP(nn.Module):
 def predict_csv(spark: SparkSession, input_csv: str, model_path: Path = MODEL_PATH, report_path: Path | None = None) -> pd.DataFrame:
     # Read input and extract features; preserve `id` if present for submission format
     # Treat common textual null markers like 'NA' and empty strings as nulls
+    # Use same robust CSV options for prediction inputs
     df = (
         spark.read.option("header", True)
         .option("nullValue", "NA")
         .option("treatEmptyValuesAsNulls", "true")
+        .option("encoding", "UTF-8")
+        .option("sep", ",")
+        .option("quote", '"')
+        .option("escape", '"')
+        .option("multiLine", "true")
+        .option("ignoreLeadingWhiteSpace", "true")
+        .option("ignoreTrailingWhiteSpace", "true")
+        .option("mode", "PERMISSIVE")
         .csv(input_csv)
     )
     # Sanitize numeric fields similarly to the training preprocessing to
@@ -261,24 +260,25 @@ def load_config(path: str | Path) -> dict:
     cp = configparser.ConfigParser()
     cp.read(path)
     cfg = {}
-    # input/model paths may be under [paths]
     cfg["input_csv"] = cp.get("paths", "input_csv", fallback="prediction_input/test_merged.csv")
     cfg["model_path"] = cp.get("paths", "model_path", fallback=str(MODEL_PATH))
-    cfg["output_csv"] = cp.get("prediction", "output_csv", fallback=None)
-    cfg["app_name"] = cp.get("prediction", "app_name", fallback="spark-pytorch-predict")
-    cfg["report_path"] = cp.get("paths", "report_path", fallback="training_report.txt")
+    cfg["report_path"] = cp.get("paths", "report_path", fallback=None)
+    cfg["output_csv"] = cp.get("paths", "output_csv", fallback="prediction_output/prediction_result.csv")
     return cfg
 
 
 def main():
     cfg = load_config("config.cfg")
-    spark = get_spark(app_name=cfg.get("app_name"))
+
+    spark = get_spark()
+
     preds = predict_csv(
         spark,
-        cfg.get("input_csv"),
-        model_path=Path(cfg.get("model_path")),
-        report_path=Path(cfg.get("report_path")) if cfg.get("report_path") else None,
+        cfg["input_csv"],
+        model_path=Path(cfg["model_path"]),
+        report_path=Path(cfg["report_path"]) if cfg.get("report_path") else None,
     )
+
     output = cfg.get("output_csv") or "prediction_output/prediction_result.csv"
     Path(output).parent.mkdir(parents=True, exist_ok=True)
     preds.to_csv(output, index=False)
