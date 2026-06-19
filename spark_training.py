@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Tuple
 from contextlib import nullcontext
 import configparser
+import time
 
 import numpy as np
 import pandas as pd
@@ -103,10 +104,13 @@ def train_model(
                 except Exception:
                     scaler = None
     model.train()
+    epoch_stats: list[dict] = []
+    train_start_time = time.perf_counter()
     for epoch in range(1, epochs + 1):
         total_loss = 0.0
         total = 0
         abs_err = 0.0
+        epoch_start = time.perf_counter()
         for xb, yb in train_dl:
             xb, yb = xb.to(device), yb.to(device)
             opt.zero_grad()
@@ -181,6 +185,18 @@ def train_model(
         else:
             no_improve += 1
 
+        epoch_time = time.perf_counter() - epoch_start
+        epoch_stats.append({
+            "epoch": epoch,
+            "train_mse": float(train_mse),
+            "train_rmse": float(train_rmse),
+            "train_mae": float(train_mae),
+            "val_mse": float(val_mse),
+            "val_rmse": float(val_rmse),
+            "val_mae": float(val_mae),
+            "epoch_time_s": float(epoch_time),
+        })
+
         model.train()
 
         # early stopping
@@ -199,7 +215,18 @@ def train_model(
         torch.save(model.state_dict(), str(model_path))
         print(f"Model saved to {model_path}")
 
-    return model, {"train_mse": train_mse, "train_rmse": train_rmse, "train_mae": train_mae, "val_mse": val_mse, "val_rmse": val_rmse, "val_mae": val_mae}
+    training_total_time = time.perf_counter() - train_start_time
+
+    return model, {
+        "train_mse": float(train_mse),
+        "train_rmse": float(train_rmse),
+        "train_mae": float(train_mae),
+        "val_mse": float(val_mse),
+        "val_rmse": float(val_rmse),
+        "val_mae": float(val_mae),
+        "epoch_stats": epoch_stats,
+        "training_total_time_s": float(training_total_time),
+    }
 
 
 def load_config(path: str | Path) -> dict:
@@ -234,8 +261,12 @@ def main():
     weight_decay = cfg.get("weight_decay")
     early_stopping_patience = cfg.get("early_stopping_patience")
 
+    # measure preprocessing time
+    pre_start = time.perf_counter()
     df = load_and_preprocess(spark, train_csv)
-    train_model(
+    pre_time = time.perf_counter() - pre_start
+
+    model, results = train_model(
         df,
         epochs=epochs,
         batch_size=batch_size,
@@ -244,6 +275,26 @@ def main():
         weight_decay=weight_decay,
         early_stopping_patience=early_stopping_patience,
     )
+
+    # Write a simple training report
+    training_time = results.get("training_total_time_s", 0.0)
+    epoch_stats = results.get("epoch_stats", [])
+    offline_total = pre_time + float(training_time)
+
+    report_lines = []
+    report_lines.append(f"Preprocessing time (s): {pre_time:.6f}")
+    report_lines.append(f"Total training time (s): {training_time:.6f}")
+    report_lines.append(f"Offline total time (preprocessing + training) (s): {offline_total:.6f}")
+    report_lines.append("")
+    report_lines.append("Per-epoch timing and metrics:")
+    for es in epoch_stats:
+        report_lines.append(
+            f"Epoch {es['epoch']}: time={es['epoch_time_s']:.6f}s train_rmse={es['train_rmse']:.4f} val_rmse={es['val_rmse']:.4f}"
+        )
+
+    report_path = Path("training_report.txt")
+    report_path.write_text("\n".join(report_lines))
+    print(f"Training report written to {report_path}")
 
 
 if __name__ == "__main__":

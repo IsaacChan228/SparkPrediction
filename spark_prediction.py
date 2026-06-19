@@ -204,6 +204,17 @@ def predict_csv(spark: SparkSession, input_csv: str, model_path: Path = MODEL_PA
     avg = total / max(1, len(ratings))
     print(f"Inference total time: {total:.6f}s, average per record: {avg:.6f}s")
 
+    # If a training report exists, append the inference timing to it so both
+    # training and inference times appear in the same report.
+    report_path = Path("training_report.txt")
+    if report_path.exists():
+        try:
+            with report_path.open("a", encoding="utf-8") as fh:
+                fh.write(f"\nInference: {len(ratings)} records, total_time_s={total:.6f}, avg_time_s={avg:.6f}\n")
+        except Exception:
+            # Do not fail prediction if report append fails; just continue
+            pass
+
     return out
 
 
