@@ -133,7 +133,7 @@ class MLP(nn.Module):
         return self.net(x)
 
 
-def predict_csv(spark: SparkSession, input_csv: str, model_path: Path = MODEL_PATH) -> pd.DataFrame:
+def predict_csv(spark: SparkSession, input_csv: str, model_path: Path = MODEL_PATH, report_path: Path | None = None) -> pd.DataFrame:
     # Read input and extract features; preserve `id` if present for submission format
     df = spark.read.option("header", True).csv(input_csv)
     # Sanitize numeric fields similarly to the training preprocessing to
@@ -206,14 +206,14 @@ def predict_csv(spark: SparkSession, input_csv: str, model_path: Path = MODEL_PA
 
     # If a training report exists, append the inference timing to it so both
     # training and inference times appear in the same report.
-    report_path = Path("training_report.txt")
-    if report_path.exists():
-        try:
-            with report_path.open("a", encoding="utf-8") as fh:
-                fh.write(f"\nInference: {len(ratings)} records, total_time_s={total:.6f}, avg_time_s={avg:.6f}\n")
-        except Exception:
-            # Do not fail prediction if report append fails; just continue
-            pass
+    if report_path is not None:
+        rp = Path(report_path)
+        if rp.exists():
+            try:
+                with rp.open("a", encoding="utf-8") as fh:
+                    fh.write(f"\nInference: {len(ratings)} records, total_time_s={total:.6f}, avg_time_s={avg:.6f}\n")
+            except Exception:
+                pass
 
     return out
 
@@ -227,13 +227,19 @@ def load_config(path: str | Path) -> dict:
     cfg["model_path"] = cp.get("paths", "model_path", fallback=str(MODEL_PATH))
     cfg["output_csv"] = cp.get("prediction", "output_csv", fallback=None)
     cfg["app_name"] = cp.get("prediction", "app_name", fallback="spark-pytorch-predict")
+    cfg["report_path"] = cp.get("paths", "report_path", fallback="training_report.txt")
     return cfg
 
 
 def main():
     cfg = load_config("config.cfg")
     spark = get_spark(app_name=cfg.get("app_name"))
-    preds = predict_csv(spark, cfg.get("input_csv"), model_path=Path(cfg.get("model_path")))
+    preds = predict_csv(
+        spark,
+        cfg.get("input_csv"),
+        model_path=Path(cfg.get("model_path")),
+        report_path=Path(cfg.get("report_path")) if cfg.get("report_path") else None,
+    )
     output = cfg.get("output_csv") or "prediction_output/prediction_result.csv"
     Path(output).parent.mkdir(parents=True, exist_ok=True)
     preds.to_csv(output, index=False)

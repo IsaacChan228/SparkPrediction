@@ -243,6 +243,7 @@ def load_config(path: str | Path) -> dict:
     cfg["train_csv"] = cp.get("paths", "train_csv", fallback="training_data/train_merged.csv")
     cfg["input_csv"] = cp.get("paths", "input_csv", fallback="prediction_input/test_merged.csv")
     cfg["model_path"] = cp.get("paths", "model_path", fallback=str(MODEL_PATH))
+    cfg["report_path"] = cp.get("paths", "report_path", fallback="prediction_output/training_report.txt")
 
     return cfg
 
@@ -292,7 +293,7 @@ def main():
             f"Epoch {es['epoch']}: time={es['epoch_time_s']:.6f}s train_rmse={es['train_rmse']:.4f} val_rmse={es['val_rmse']:.4f}"
         )
 
-    report_path = Path("training_report.txt")
+    report_path = Path(cfg.get("report_path") or "training_report.txt")
     report_path.write_text("\n".join(report_lines))
     print(f"Training report written to {report_path}")
 
