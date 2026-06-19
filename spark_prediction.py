@@ -82,8 +82,22 @@ class MLP(nn.Module):
 
 
 def predict_csv(spark: SparkSession, input_csv: str, model_path: Path = MODEL_PATH) -> pd.DataFrame:
-    data = load_and_preprocess(spark, input_csv)
-    X = data[["votes", "purchased", "time", "comment_len"]].values
+    # Read input and extract features; preserve `id` if present for submission format
+    df = spark.read.option("header", True).csv(input_csv)
+    df2 = (
+        df.select(
+            F.col("id").alias("id"),
+            F.col("votes").cast("double").alias("votes"),
+            (F.when(F.upper(F.col("purchased")) == "TRUE", 1.0).otherwise(0.0)).alias("purchased"),
+            F.col("time").cast("double").alias("time"),
+            F.length(F.col("comment")).cast("double").alias("comment_len"),
+        )
+        .na.fill({"votes": 0.0, "time": 0.0, "comment_len": 0.0, "purchased": 0.0})
+    )
+
+    pdf = df2.toPandas()
+    ids = pdf.get("id")
+    X = pdf[["votes", "purchased", "time", "comment_len"]].astype(float).values
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = MLP(input_dim=X.shape[1])
@@ -114,7 +128,15 @@ def predict_csv(spark: SparkSession, input_csv: str, model_path: Path = MODEL_PA
         preds = model(xb).squeeze(1).cpu().numpy()
         preds = np.clip(preds, 1.0, 5.0)
 
-    out = pd.DataFrame({"prediction": preds})
+    # Round/clamp predictions to integer ratings 1-5
+    ratings = np.rint(preds).astype(int)
+    ratings = np.clip(ratings, 1, 5)
+
+    if ids is not None:
+        out = pd.DataFrame({"id": ids.astype(int), "rating": ratings})
+    else:
+        out = pd.DataFrame({"id": np.arange(len(ratings)), "rating": ratings})
+
     return out
 
 
@@ -134,13 +156,10 @@ def main():
     cfg = load_config("config.cfg")
     spark = get_spark(app_name=cfg.get("app_name"))
     preds = predict_csv(spark, cfg.get("input_csv"), model_path=Path(cfg.get("model_path")))
-    output = cfg.get("output_csv")
-    if output:
-        Path(output).parent.mkdir(parents=True, exist_ok=True)
-        preds.to_csv(output, index=False)
-        print(f"Predictions written to {output}")
-    else:
-        print(preds.head())
+    output = cfg.get("output_csv") or "prediction_output/prediction_result.csv"
+    Path(output).parent.mkdir(parents=True, exist_ok=True)
+    preds.to_csv(output, index=False)
+    print(f"Predictions written to {output}")
 
 
 if __name__ == "__main__":
