@@ -47,6 +47,17 @@ def train_model(
     X = data[["votes", "purchased", "time", "comment_len"]].values
     y = data["label"].values
 
+    # Diagnostics: print label distribution and basic stats to help debug
+    try:
+        uniq, counts = np.unique(y, return_counts=True)
+        print(f"Label distribution: {dict(zip(uniq.tolist(), counts.tolist()))}")
+        print(f"Label mean={float(np.mean(y)):.4f} std={float(np.std(y)):.4f} n={len(y)}")
+        if len(uniq) == 1:
+            print("WARNING: all labels are identical — model will predict a constant value.")
+    except Exception:
+        # don't fail training for diagnostic printing
+        pass
+
     # 80/20 train/validation split
     n = len(y)
     if n == 0:
@@ -60,6 +71,44 @@ def train_model(
 
     X_train, y_train = X[train_idx], y[train_idx]
     X_val, y_val = X[val_idx], y[val_idx]
+
+    # Feature diagnostics on raw (pre-standardized) features
+    try:
+        feat_names = ["votes", "purchased", "time", "comment_len"]
+        print("Feature diagnostics (train split):")
+        for i, name in enumerate(feat_names):
+            fmean = float(np.mean(X_train[:, i]))
+            fstd = float(np.std(X_train[:, i]))
+            # correlation with label
+            try:
+                corr = float(np.corrcoef(X_train[:, i], y_train)[0, 1])
+            except Exception:
+                corr = float("nan")
+            # non-zero count and percentiles
+            try:
+                nonzero = int(np.count_nonzero(X_train[:, i]))
+                p25, p50, p75 = np.percentile(X_train[:, i], [25, 50, 75])
+            except Exception:
+                nonzero = 0
+                p25 = p50 = p75 = float("nan")
+            print(
+                f"  {name}: mean={fmean:.4f} std={fstd:.4f} corr_with_label={corr:.4f} "
+                f"nonzero={nonzero}/{len(X_train)} p25={p25:.4f} p50={p50:.4f} p75={p75:.4f}"
+            )
+
+        # Linear least-squares baseline (intercept + linear features)
+        try:
+            X_lin_train = np.concatenate([np.ones((X_train.shape[0], 1)), X_train], axis=1)
+            w, *_ = np.linalg.lstsq(X_lin_train, y_train, rcond=None)
+            X_lin_val = np.concatenate([np.ones((X_val.shape[0], 1)), X_val], axis=1)
+            y_val_pred = X_lin_val.dot(w)
+            lin_mse = float(np.mean((y_val_pred - y_val) ** 2))
+            lin_mae = float(np.mean(np.abs(y_val_pred - y_val)))
+            print(f"Linear baseline on raw features: val_mse={lin_mse:.6f} val_mae={lin_mae:.6f}")
+        except Exception as e:
+            print(f"Linear baseline computation failed: {e}")
+    except Exception:
+        pass
 
     # Standardize features using train statistics
     mean = X_train.mean(axis=0)

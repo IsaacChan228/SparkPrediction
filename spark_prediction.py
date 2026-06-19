@@ -67,7 +67,38 @@ def get_spark(app_name: str = "spark-pytorch-mlp") -> SparkSession:
 
 
 def load_and_preprocess(spark: SparkSession, csv_path: str) -> pd.DataFrame:
-    df = spark.read.option("header", True).csv(csv_path)
+    # Treat common textual null markers like 'NA' and empty strings as nulls
+    df = (
+        spark.read.option("header", True)
+        .option("nullValue", "NA")
+        .option("treatEmptyValuesAsNulls", "true")
+        .csv(csv_path)
+    )
+
+    # Diagnostic: show raw data sample and null/NA counts to debug missing features
+    try:
+        cols = ["votes", "time", "purchased", "comment", "rating"]
+        print("Raw sample rows (first 10) for columns:", cols)
+        df.select(*cols).show(10, truncate=False)
+
+        null_counts_row = df.select([F.count(F.when(F.col(c).isNull(), c)).alias(c) for c in cols]).collect()[0]
+        print("Null counts:")
+        for c in cols:
+            print(f"  {c}: {null_counts_row[c]}")
+
+        # Count literal 'NA' strings (if treatEmptyValuesAsNulls didn't catch them)
+        na_counts = df.select([F.count(F.when(F.col(c) == "NA", c)).alias(c) for c in cols]).collect()[0]
+        print("Literal 'NA' counts:")
+        for c in cols:
+            print(f"  {c}: {na_counts[c]}")
+
+        # Show a few non-null examples for votes/time if present
+        print("Examples of non-null 'votes' values:")
+        df.select("votes").where(F.col("votes").isNotNull()).limit(10).show(truncate=False)
+        print("Examples of non-null 'time' values:")
+        df.select("time").where(F.col("time").isNotNull()).limit(10).show(truncate=False)
+    except Exception:
+        pass
 
     # Basic feature engineering: votes, purchased, time, comment length
     # Sanitize numeric input before casting to avoid failures when fields contain
@@ -75,10 +106,10 @@ def load_and_preprocess(spark: SparkSession, csv_path: str) -> pd.DataFrame:
     # non-numeric characters, validate the cleaned string matches a number,
     # and fallback to 0.0 when invalid.
     votes_clean = F.regexp_replace(F.col("votes"), "[^0-9.\\-]", "")
-    votes_num = F.when(votes_clean.rlike(r"^-?\\d+(\\.\\d+)?$"), votes_clean.cast("double")).otherwise(F.lit(0.0)).alias("votes")
+    votes_num = F.when(votes_clean.rlike(r"^-?\d+(\.\d+)?$"), votes_clean.cast("double")).otherwise(F.lit(0.0)).alias("votes")
 
     time_clean = F.regexp_replace(F.col("time"), "[^0-9.\\-]", "")
-    time_num = F.when(time_clean.rlike(r"^-?\\d+(\\.\\d+)?$"), time_clean.cast("double")).otherwise(F.lit(0.0)).alias("time")
+    time_num = F.when(time_clean.rlike(r"^-?\d+(\.\d+)?$"), time_clean.cast("double")).otherwise(F.lit(0.0)).alias("time")
 
     df2 = (
         df.select(
@@ -86,8 +117,10 @@ def load_and_preprocess(spark: SparkSession, csv_path: str) -> pd.DataFrame:
             (F.when(F.upper(F.col("purchased")) == "TRUE", 1.0).otherwise(0.0)).alias("purchased"),
             time_num,
             F.length(F.col("comment")).cast("double").alias("comment_len"),
-            # Only cast rating when it is a single digit 1-5; otherwise use NULL
-            F.when(F.col("rating").rlike(r"^[1-5]$"), F.col("rating").cast("int")).otherwise(F.lit(None)).alias("rating"),
+            F.when(
+                F.regexp_replace(F.col("rating"), "[^0-9.]", "").rlike(r"^[1-5](\.0+)?$"),
+                F.regexp_replace(F.col("rating"), "[^0-9.]", "").cast("double"),
+            ).otherwise(F.lit(None)).alias("rating"),
         )
         .na.fill({"votes": 0.0, "time": 0.0, "comment_len": 0.0, "purchased": 0.0})
     )
@@ -135,14 +168,20 @@ class MLP(nn.Module):
 
 def predict_csv(spark: SparkSession, input_csv: str, model_path: Path = MODEL_PATH, report_path: Path | None = None) -> pd.DataFrame:
     # Read input and extract features; preserve `id` if present for submission format
-    df = spark.read.option("header", True).csv(input_csv)
+    # Treat common textual null markers like 'NA' and empty strings as nulls
+    df = (
+        spark.read.option("header", True)
+        .option("nullValue", "NA")
+        .option("treatEmptyValuesAsNulls", "true")
+        .csv(input_csv)
+    )
     # Sanitize numeric fields similarly to the training preprocessing to
     # tolerate malformed string values in CSV inputs.
     votes_clean = F.regexp_replace(F.col("votes"), "[^0-9.\\-]", "")
-    votes_num = F.when(votes_clean.rlike(r"^-?\\d+(\\.\\d+)?$"), votes_clean.cast("double")).otherwise(F.lit(0.0)).alias("votes")
+    votes_num = F.when(votes_clean.rlike(r"^-?\d+(\.\d+)?$"), votes_clean.cast("double")).otherwise(F.lit(0.0)).alias("votes")
 
     time_clean = F.regexp_replace(F.col("time"), "[^0-9.\\-]", "")
-    time_num = F.when(time_clean.rlike(r"^-?\\d+(\\.\\d+)?$"), time_clean.cast("double")).otherwise(F.lit(0.0)).alias("time")
+    time_num = F.when(time_clean.rlike(r"^-?\d+(\.\d+)?$"), time_clean.cast("double")).otherwise(F.lit(0.0)).alias("time")
 
     df2 = (
         df.select(
