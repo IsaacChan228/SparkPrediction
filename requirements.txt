@@ -1,14 +1,20 @@
 # Runtime requirements for this project.
-# The code uses only Python standard library modules (csv, re, pathlib,
-# concurrent.futures, typing, etc.) so no mandatory external packages are
-# required for Python 3.8+.
-#
-# Optional backports for older Python versions:
+# This project is designed for Python 3.11.
+# The code uses standard library modules (csv, re, pathlib, concurrent.futures, typing, etc.)
+# Optional backports for older Python versions (kept for compatibility):
 dataclasses; python_version < "3.7"
-typing-extensions; python_version < "3.8"
+# typing-extensions; python_version < "3.8"
 
-# To install (if any):
-#   pip install -r requirement.txt
+# System requirements (install separately; not available via pip)
+# PySpark requires a Java runtime (JDK). Install a Java Development Kit (JDK) 11 or newer (64-bit).
+# Examples:
+#  - Windows (Chocolatey):  choco install temurin11jdk -y
+#  - macOS (Homebrew):      brew install --cask temurin
+#  - Ubuntu/Debian:         sudo apt install openjdk-11-jdk
+# After installing, set JAVA_HOME to the JDK path and add $JAVA_HOME/bin to PATH.
+#
+# To install Python dependencies:
+#   pip install -r requirements.txt
 
 # PySpark is required to run the Spark-based training pipeline
 pyspark>=3.1.2
@@ -16,16 +22,16 @@ pyspark>=3.1.2
 # Optional helper to locate Spark when running locally
 findspark>=1.4.2
 
-# PyTorch, pandas and numpy used by spark_training.py
-torch>=1.12.0
+# pandas and numpy used by spark_training.py
 pandas>=1.2.0
 numpy>=1.19.0
 
-# CUDA-enabled PyTorch (example for CUDA 13.2). When installing from this
-# requirements file, pip will use the PyTorch CUDA wheel index to fetch
-# GPU-enabled wheels. If your system has a different CUDA runtime, change
-# the URL (e.g. cu118, cu121, cu132) to a compatible one.
---extra-index-url https://download.pytorch.org/whl/cu132
+# PyTorch: for GPU-enabled wheels, pip needs the PyTorch wheel index.
+# Uncomment and adjust the CUDA tag if you want to install a CUDA build.
+# Example (CUDA 13.2):
+# --extra-index-url https://download.pytorch.org/whl/cu132
+# Then install the packages below (torch, torchvision, torchaudio).
+# For CPU-only install, pip will install CPU wheels from the default index.
 torch
 torchvision
 torchaudio
