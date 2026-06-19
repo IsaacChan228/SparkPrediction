@@ -14,3 +14,4 @@ prediction_input/test_merged.csv
 # Optional: ignore environment and cache files
 .DS_Store
 __pycache__/
+.vscode/

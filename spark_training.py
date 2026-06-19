@@ -2,103 +2,36 @@
 
 This script reads cleaned training CSV via PySpark, performs light
 feature engineering, trains a small PyTorch MLP to predict the
-`rating` field (1-5), and saves the trained model to
-`Model/pytorch_mlp.pt`.
+`rating` field (1-5). It reads cleaned training CSV via
+PySpark, performs light feature engineering, trains the model, and
+saves the trained model to `Model/pytorch_mlp.pt`.
 
-Usage examples:
-  Train:
-    python spark_training.py --mode train --train-csv training_data/train_merged.csv
+Prediction functionality was moved to `spark_prediction.py`. To run
+predictions use that module (it includes a CLI). Examples:
+    Train:
+        python spark_training.py --mode train
 
-  Predict (CSV in same format):
-    python spark_training.py --mode predict --input-csv prediction_input/test_merged.csv
+    Predict:
+        python spark_prediction.py
 
-Notes:
-- This implementation collects features to the driver as a pandas
-  dataframe before feeding them to PyTorch. It's intended for small to
-  medium datasets. For large-scale training, replace the collection step
-  with a distributed training approach (Horovod, PyTorch on Spark, etc.).
 """
 
 from __future__ import annotations
 
-import argparse
 import os
 from pathlib import Path
 from typing import Tuple
+import configparser
 
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 from pyspark.sql import SparkSession
 import pyspark.sql.functions as F
 
-
-MODEL_PATH = Path("Model/pytorch_mlp.pt")
-
-
-def get_spark(app_name: str = "spark-pytorch-mlp") -> SparkSession:
-    return SparkSession.builder.appName(app_name).getOrCreate()
-
-
-def load_and_preprocess(spark: SparkSession, csv_path: str) -> pd.DataFrame:
-    df = spark.read.option("header", True).csv(csv_path)
-
-    # Basic feature engineering: votes, purchased, time, comment length
-    df2 = (
-        df.select(
-            F.col("votes").cast("double").alias("votes"),
-            (F.when(F.upper(F.col("purchased")) == "TRUE", 1.0).otherwise(0.0)).alias("purchased"),
-            F.col("time").cast("double").alias("time"),
-            F.length(F.col("comment")).cast("double").alias("comment_len"),
-            F.col("rating").cast("int").alias("rating"),
-        )
-        .na.fill({"votes": 0.0, "time": 0.0, "comment_len": 0.0, "purchased": 0.0})
-    )
-
-    pdf = df2.toPandas()
-    # Drop rows without label
-    pdf = pdf[pd.notnull(pdf["rating"])]
-    # For regression use the raw rating as the target (1.0..5.0)
-    pdf["label"] = pdf["rating"].astype(float)
-    features = pdf[["votes", "purchased", "time", "comment_len"]].astype(float)
-    pdf_features = features.fillna(0.0)
-    pdf_final = pd.concat([pdf_features, pdf[["label"]].astype(float)], axis=1)
-    return pdf_final
-
-
-class TabularDataset(Dataset):
-    def __init__(self, arr: np.ndarray, labels: np.ndarray):
-        self.x = torch.from_numpy(arr).float()
-        # regression target as float
-        self.y = torch.from_numpy(labels).float()
-
-    def __len__(self):
-        return len(self.y)
-
-    def __getitem__(self, idx):
-        return self.x[idx], self.y[idx]
-
-
-class MLP(nn.Module):
-    def __init__(self, input_dim: int, hidden1: int = 128, hidden2: int = 64, out: int = 1, dropout: float = 0.2):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden1),
-            nn.BatchNorm1d(hidden1),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden1, hidden2),
-            nn.BatchNorm1d(hidden2),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden2, out),
-        )
-
-    def forward(self, x):
-        return self.net(x)
-
+from spark_prediction import MODEL_PATH, get_spark, load_and_preprocess, TabularDataset, MLP, predict_csv
 
 def train_model(
     data: pd.DataFrame,
@@ -243,66 +176,48 @@ def train_model(
     return model, {"train_mse": train_mse, "train_rmse": train_rmse, "train_mae": train_mae, "val_mse": val_mse, "val_rmse": val_rmse, "val_mae": val_mae}
 
 
-def predict_csv(spark: SparkSession, input_csv: str, model_path: Path = MODEL_PATH) -> pd.DataFrame:
-    data = load_and_preprocess(spark, input_csv)
-    X = data[["votes", "purchased", "time", "comment_len"]].values
+def load_config(path: str | Path) -> dict:
+    cp = configparser.ConfigParser()
+    cp.read(path)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = MLP(input_dim=X.shape[1])
+    cfg = {}
+    cfg["epochs"] = cp.getint("training", "epochs", fallback=10)
+    cfg["batch_size"] = cp.getint("training", "batch_size", fallback=64)
+    cfg["lr"] = cp.getfloat("training", "lr", fallback=1e-3)
+    cfg["weight_decay"] = cp.getfloat("training", "weight_decay", fallback=1e-5)
+    cfg["early_stopping_patience"] = cp.getint("training", "early_stopping_patience", fallback=5)
 
-    # load model; saved object may contain scaler and model_state
-    loaded = torch.load(str(model_path), map_location=device)
-    scaler = None
-    if isinstance(loaded, dict) and "model_state" in loaded:
-        state = loaded["model_state"]
-        scaler = loaded.get("scaler")
-        model.load_state_dict(state)
-    else:
-        # legacy: state_dict only
-        model.load_state_dict(loaded)
+    cfg["train_csv"] = cp.get("paths", "train_csv", fallback="training_data/train_merged.csv")
+    cfg["input_csv"] = cp.get("paths", "input_csv", fallback="prediction_input/test_merged.csv")
+    cfg["model_path"] = cp.get("paths", "model_path", fallback=str(MODEL_PATH))
 
-    model.to(device)
-    model.eval()
-
-    # apply scaler if available
-    if scaler is not None:
-        mean = np.array(scaler.get("mean", 0.0))
-        std = np.array(scaler.get("std", 1.0))
-        std[std == 0] = 1.0
-        X = (X - mean) / std
-
-    with torch.no_grad():
-        xb = torch.from_numpy(X).float().to(device)
-        preds = model(xb).squeeze(1).cpu().numpy()
-        # clip predictions to valid rating range
-        preds = np.clip(preds, 1.0, 5.0)
-
-    out = pd.DataFrame({"prediction": preds})
-    return out
-
-
-def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument("--mode", choices=["train", "predict"], required=True)
-    p.add_argument("--train-csv", default="training_data/train_merged.csv")
-    p.add_argument("--input-csv", default="prediction_input/test_merged.csv")
-    p.add_argument("--epochs", type=int, default=10)
-    p.add_argument("--batch-size", type=int, default=64)
-    p.add_argument("--lr", type=float, default=1e-3)
-    p.add_argument("--model-path", default=str(MODEL_PATH))
-    return p.parse_args()
+    return cfg
 
 
 def main():
-    args = parse_args()
     spark = get_spark()
 
-    if args.mode == "train":
-        df = load_and_preprocess(spark, args.train_csv)
-        train_model(df, epochs=args.epochs, batch_size=args.batch_size, lr=args.lr, model_path=Path(args.model_path))
-    else:
-        preds = predict_csv(spark, args.input_csv, model_path=Path(args.model_path))
-        print(preds.head())
+    cfg = load_config("config.cfg")
+
+    train_csv = cfg.get("train_csv")
+    model_path = Path(cfg.get("model_path"))
+
+    epochs = cfg.get("epochs")
+    batch_size = cfg.get("batch_size")
+    lr = cfg.get("lr")
+    weight_decay = cfg.get("weight_decay")
+    early_stopping_patience = cfg.get("early_stopping_patience")
+
+    df = load_and_preprocess(spark, train_csv)
+    train_model(
+        df,
+        epochs=epochs,
+        batch_size=batch_size,
+        lr=lr,
+        model_path=model_path,
+        weight_decay=weight_decay,
+        early_stopping_patience=early_stopping_patience,
+    )
 
 
 if __name__ == "__main__":
