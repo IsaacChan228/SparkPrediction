@@ -35,60 +35,6 @@ import pyspark.sql.functions as F
 
 from spark_prediction import MODEL_PATH, get_spark, load_and_preprocess, TabularDataset, MLP, predict_csv
 
-def diagnose_rating_nulls(spark: SparkSession, csv_path: str, limit: int = 50) -> Path | None:
-    """Find rows where raw `rating` exists but cleaning produces NULL.
-
-    Writes up to `limit` sample rows to `artifacts/problematic_ratings_training.txt` and
-    returns the path (or None on error).
-    """
-    out_dir = Path("artifacts")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_file = out_dir / "problematic_ratings_training.txt"
-    try:
-        # use robust CSV options matching training/prediction readers
-        df = (
-            spark.read.option("header", True)
-            .option("nullValue", "NA")
-            .option("treatEmptyValuesAsNulls", "true")
-            .option("encoding", "UTF-8")
-            .option("sep", ",")
-            .option("quote", '"')
-            .option("escape", '"')
-            .option("multiLine", "true")
-            .option("ignoreLeadingWhiteSpace", "true")
-            .option("ignoreTrailingWhiteSpace", "true")
-            .option("mode", "PERMISSIVE")
-            .csv(csv_path)
-        )
-
-        rating_clean = F.when(
-            F.regexp_replace(F.col("rating"), "[^0-9.]", "").rlike(r"^[1-5](\.0+)?$"),
-            F.regexp_replace(F.col("rating"), "[^0-9.]", "").cast("double").cast("int"),
-        ).otherwise(F.lit(None))
-
-        sel = df.select(
-            F.col("rating").alias("raw_rating"),
-            F.col("comment"),
-            F.col("votes"),
-            F.col("time"),
-            rating_clean.alias("clean_rating"),
-        ).where((F.col("raw_rating").isNotNull()) & (rating_clean.isNull()))
-
-        total = sel.count()
-        samples = sel.limit(limit).collect()
-
-        with out_file.open("w", encoding="utf-8") as fh:
-            fh.write(f"Total problematic rows: {total}\n")
-            for r in samples:
-                # write a compact dict of the row fields
-                fh.write(str({k: r[k] for k in r.__fields__}) + "\n")
-
-        print(f"Diagnose: {total} rows where cleaned rating is NULL; samples written to {out_file}")
-        return out_file
-    except Exception as e:
-        print(f"Diagnose failed: {e}")
-        return None
-
 
 def train_model(
     data: pd.DataFrame,
@@ -99,6 +45,7 @@ def train_model(
     weight_decay: float = 1e-5,
     early_stopping_patience: int = 5,
 ) -> Tuple[MLP, dict]:
+    print("Preparing training data...")
     X = data[["votes", "purchased", "time", "comment_len"]].values
     y = data["label"].values
 
@@ -118,6 +65,8 @@ def train_model(
     X_train, y_train = X[train_idx], y[train_idx]
     X_val, y_val = X[val_idx], y[val_idx]
 
+    print(f"Total samples: {n}, train: {len(train_idx)}, val: {len(val_idx)}")
+
     # Feature diagnostics and linear baseline removed to quiet output
 
     # Standardize features using train statistics
@@ -131,6 +80,8 @@ def train_model(
     val_ds = TabularDataset(X_val, y_val)
     train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
     val_dl = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
+
+    print(f"DataLoaders ready (batch_size={batch_size}). Starting training...")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = MLP(input_dim=X.shape[1])
@@ -170,6 +121,9 @@ def train_model(
         total = 0
         abs_err = 0.0
         epoch_start = time.perf_counter()
+        num_batches = len(train_dl)
+        progress_interval = max(1, num_batches // 10)
+        batch_idx = 0
         for xb, yb in train_dl:
             xb, yb = xb.to(device), yb.to(device)
             opt.zero_grad()
@@ -204,6 +158,10 @@ def train_model(
             total_loss += loss.item() * bs
             abs_err += torch.abs(preds - yb).sum().item()
             total += bs
+            batch_idx += 1
+            if batch_idx % progress_interval == 0 or batch_idx == num_batches:
+                pct = (batch_idx / num_batches) * 100.0
+                print(f"Epoch {epoch}: batch {batch_idx}/{num_batches} ({pct:.0f}%) loss={loss.item():.4f}")
 
         train_mse = total_loss / max(1, total)
         train_rmse = float(np.sqrt(train_mse))
@@ -309,14 +267,7 @@ def load_config(path: str | Path) -> dict:
 
 def main():
     spark = get_spark()
-
-    # Run a quick diagnostic to capture problematic rating rows before preprocessing
-    try:
-        diagnose_rating_nulls(spark, "training_data/train_merged.csv", limit=50)
-    except Exception:
-        pass
-
-    # Sampling moved to `load_and_preprocess` in spark_prediction.py
+    print("Spark session started")
 
     cfg = load_config("config.cfg")
 
@@ -330,9 +281,50 @@ def main():
     early_stopping_patience = cfg.get("early_stopping_patience")
 
     # measure preprocessing time
+    print(f"Preprocessing input CSV: {train_csv}")
     pre_start = time.perf_counter()
     df = load_and_preprocess(spark, train_csv)
     pre_time = time.perf_counter() - pre_start
+    try:
+        print(f"Preprocessing completed: {len(df)} rows (took {pre_time:.2f}s)")
+    except Exception:
+        print(f"Preprocessing completed (took {pre_time:.2f}s)")
+
+    # Compute rating distribution, mean and standard deviation from the preprocessed DataFrame
+    try:
+        total_rows = len(df)
+        rating_series = df["label"].astype(float)
+        vc = rating_series.value_counts().to_dict()
+        # ensure integer keys 1..5 map to counts
+        rating_counts = {i: int(vc.get(float(i), 0) or vc.get(i, 0)) for i in range(1, 6)}
+        rating_mean = float(rating_series.mean())
+        rating_sd = float(rating_series.std())
+    except Exception:
+        total_rows = len(df)
+        rating_counts = {i: 0 for i in range(1, 6)}
+        rating_mean = 0.0
+        rating_sd = 0.0
+
+    # Write a partial report containing rating distribution and stats so it
+    # can be reviewed even if training is terminated later.
+    try:
+        rp = Path(cfg.get("report_path") or "prediction_output/training_report.txt")
+        rp.parent.mkdir(parents=True, exist_ok=True)
+        with rp.open("w", encoding="utf-8") as fh:
+            fh.write("Partial training report - Rating distribution and statistics\n")
+            fh.write("Checked file: {}\n\n".format(train_csv))
+            fh.write("Rating distribution (count, percent):\n")
+            denom = total_rows if total_rows > 0 else 1
+            for r in range(1, 6):
+                c = rating_counts.get(r, 0)
+                pct = (c / denom) * 100.0
+                fh.write(f"Rating {r}: {c} ({pct:.2f}%)\n")
+            fh.write("\nRating statistics:\n")
+            fh.write(f"Mean: {rating_mean:.4f}\n")
+            fh.write(f"SD: {rating_sd:.4f}\n")
+        print(f"Wrote partial training report to {rp}")
+    except Exception as e:
+        print(f"Failed to write partial report: {e}")
 
     model, results = train_model(
         df,
@@ -353,6 +345,19 @@ def main():
     report_lines.append(f"Preprocessing time (s): {pre_time:.6f}")
     report_lines.append(f"Total training time (s): {training_time:.6f}")
     report_lines.append(f"Offline total time (preprocessing + training) (s): {offline_total:.6f}")
+    report_lines.append("")
+    # Distribution
+    report_lines.append("Rating distribution (count, percent):")
+    denom = total_rows if total_rows > 0 else 1
+    for r in range(1, 6):
+        c = rating_counts.get(r, 0)
+        pct = (c / denom) * 100.0
+        report_lines.append(f"Rating {r}: {c} ({pct:.2f}%)")
+    report_lines.append("")
+    # Summary statistics
+    report_lines.append("Rating statistics:")
+    report_lines.append(f"Mean: {rating_mean:.4f}")
+    report_lines.append(f"SD: {rating_sd:.4f}")
     report_lines.append("")
     report_lines.append("Per-epoch timing and metrics:")
     for es in epoch_stats:
