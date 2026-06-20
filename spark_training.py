@@ -13,7 +13,6 @@ predictions use that module (it includes a CLI). Examples:
 
     Predict:
         python spark_prediction.py
-
 """
 
 from __future__ import annotations
