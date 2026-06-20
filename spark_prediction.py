@@ -86,7 +86,7 @@ def load_and_preprocess(spark: SparkSession, csv_path: str) -> pd.DataFrame:
         .csv(csv_path)
     )
 
-    # Diagnostics removed to reduce noisy output
+    
 
     # Basic feature engineering: votes, purchased, time, comment length
     # Sanitize numeric input before casting to avoid failures when fields contain
@@ -112,8 +112,6 @@ def load_and_preprocess(spark: SparkSession, csv_path: str) -> pd.DataFrame:
         )
         .na.fill({"votes": 0.0, "time": 0.0, "comment_len": 0.0, "purchased": 0.0})
     )
-
-    # Removed cleaned-rating distribution diagnostics
 
     pdf = df2.toPandas()
     # Drop rows without label and make an explicit copy to avoid chained-assignment warnings
@@ -254,6 +252,7 @@ def predict_csv(spark: SparkSession, input_csv: str, model_path: Path = MODEL_PA
                 pass
 
     return out
+
 
 
 def load_config(path: str | Path) -> dict:

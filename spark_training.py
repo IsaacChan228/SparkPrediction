@@ -89,6 +89,7 @@ def diagnose_rating_nulls(spark: SparkSession, csv_path: str, limit: int = 50) -
         print(f"Diagnose failed: {e}")
         return None
 
+
 def train_model(
     data: pd.DataFrame,
     epochs: int = 30,
@@ -314,6 +315,8 @@ def main():
         diagnose_rating_nulls(spark, "training_data/train_merged.csv", limit=50)
     except Exception:
         pass
+
+    # Sampling moved to `load_and_preprocess` in spark_prediction.py
 
     cfg = load_config("config.cfg")
 
