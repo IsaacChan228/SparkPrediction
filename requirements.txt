@@ -35,3 +35,6 @@ numpy>=1.19.0
 torch
 torchvision
 torchaudio
+
+# sentence-transformers is used for the BERT encoding.
+sentence-transformers>=2.2.2

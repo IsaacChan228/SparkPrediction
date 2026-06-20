@@ -13,8 +13,6 @@ predictions use that module (it includes a CLI). Examples:
 
     Predict:
         python spark_prediction.py
-
-        test
 """
 
 from __future__ import annotations
@@ -47,7 +45,27 @@ def train_model(
     early_stopping_patience: int = 5,
 ) -> Tuple[MLP, dict]:
     print("Preparing training data...")
-    X = data[["votes", "purchased", "time", "comment_len"]].values
+    # If preprocessing stored embeddings in any of the text columns (as arrays),
+    # expand them into numeric feature columns. Otherwise use `comment_len`.
+    bert_cols = ["comment", "title", "prod_title", "prod_features"]
+    feature_cols = ["votes", "purchased", "time"]
+    expanded = False
+    for col in bert_cols:
+        if col in data.columns and data[col].dtype == object and len(data) > 0 and isinstance(data.iloc[0][col], (list, tuple, np.ndarray)):
+            first = next((v for v in data[col] if v is not None), None)
+            if first is not None:
+                emb_dim = int(len(first))
+                emb_cols = [f"{col}_emb_{i}" for i in range(emb_dim)]
+                emb_df = pd.DataFrame(list(data[col].fillna([0.0] * emb_dim)), columns=emb_cols)
+                emb_df.index = data.index
+                data = pd.concat([data, emb_df], axis=1)
+                feature_cols.extend(emb_cols)
+                expanded = True
+
+    if not expanded:
+        feature_cols.append("comment_len")
+
+    X = data[feature_cols].astype(float).values
     y = data["label"].values
 
     # Diagnostics removed to reduce noisy output
@@ -262,6 +280,9 @@ def load_config(path: str | Path) -> dict:
     cfg["input_csv"] = cp.get("paths", "input_csv", fallback="prediction_input/test_merged.csv")
     cfg["model_path"] = cp.get("paths", "model_path", fallback=str(MODEL_PATH))
     cfg["report_path"] = cp.get("paths", "report_path", fallback="prediction_output/training_report.txt")
+    # feature flags
+    cfg["use_bert"] = cp.getboolean("features", "use_bert", fallback=False)
+    cfg["bert_model"] = cp.get("features", "bert_model", fallback="all-MiniLM-L6-v2")
 
     return cfg
 
@@ -284,7 +305,7 @@ def main():
     # measure preprocessing time
     print(f"Preprocessing input CSV: {train_csv}")
     pre_start = time.perf_counter()
-    df = load_and_preprocess(spark, train_csv)
+    df = load_and_preprocess(spark, train_csv, use_bert=cfg.get("use_bert", False), bert_model_name=cfg.get("bert_model", "all-MiniLM-L6-v2"))
     pre_time = time.perf_counter() - pre_start
     try:
         print(f"Preprocessing completed: {len(df)} rows (took {pre_time:.2f}s)")

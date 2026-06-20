@@ -66,7 +66,13 @@ def get_spark(app_name: str = "spark-pytorch-mlp") -> SparkSession:
     return SparkSession.builder.appName(app_name).getOrCreate()
 
 
-def load_and_preprocess(spark: SparkSession, csv_path: str) -> pd.DataFrame:
+def load_and_preprocess(
+    spark: SparkSession,
+    csv_path: str,
+    use_bert: bool = False,
+    bert_model_name: str = "all-MiniLM-L6-v2",
+    bert_cols: list[str] | None = None,
+) -> pd.DataFrame:
     # Treat common textual null markers like 'NA' and empty strings as nulls
     # Allow quoted fields with embedded newlines and double-quote escaping
     df = (
@@ -86,7 +92,36 @@ def load_and_preprocess(spark: SparkSession, csv_path: str) -> pd.DataFrame:
         .csv(csv_path)
     )
 
-    
+
+    # Optional: encode text columns with a BERT encoder (sentence-transformers).
+    # By default we encode these fields when `use_bert=True`.
+    if bert_cols is None:
+        bert_cols = ["comment", "title", "prod_title", "prod_features"]
+
+    bert_embeddings: dict[str, any] = {}
+    emb_dim = 0
+    if use_bert:
+        try:
+            from sentence_transformers import SentenceTransformer
+
+            model = SentenceTransformer(bert_model_name)
+            for col in bert_cols:
+                if col in df.columns:
+                    try:
+                        texts_pdf = df.select(F.col(col)).toPandas()
+                        texts = texts_pdf[col].fillna("").astype(str).tolist()
+                        emb = model.encode(texts, show_progress_bar=False, convert_to_numpy=True)
+                        bert_embeddings[col] = emb
+                        emb_dim = int(emb.shape[1]) if emb is not None else emb_dim
+                        print(f"INFO: computed BERT embeddings for '{col}' (dim={emb.shape[1]})")
+                    except Exception as ex:
+                        print(f"WARNING: failed to compute embeddings for '{col}': {ex}")
+                else:
+                    # column missing in input CSV
+                    pass
+        except Exception as ex:
+            print(f"INFO: sentence-transformers not available or failed to import: {ex}")
+            bert_embeddings = {}
 
     # Basic feature engineering: votes, purchased, time, comment length
     # Sanitize numeric input before casting to avoid failures when fields contain
@@ -114,11 +149,29 @@ def load_and_preprocess(spark: SparkSession, csv_path: str) -> pd.DataFrame:
     )
 
     pdf = df2.toPandas()
+    # If embeddings were computed, replace the raw text values in the pandas
+    # DataFrame with the embedding arrays for each encoded column.
+    if bert_embeddings:
+        try:
+            pdf = pdf.copy()
+            for col, emb in bert_embeddings.items():
+                if emb.shape[0] == len(pdf):
+                    pdf[col] = list(emb)
+                else:
+                    print(f"WARNING: embedding count for '{col}' does not match dataframe rows; skipping replacement")
+        except Exception as ex:
+            print(f"WARNING: failed to attach embeddings to dataframe: {ex}")
     # Drop rows without label and make an explicit copy to avoid chained-assignment warnings
     pdf = pdf.dropna(subset=["rating"]).copy()
     pdf["label"] = pdf["rating"].astype(float)
+    # Build numeric feature frame for the simple case (no embeddings). When
+    # embeddings are present in the `comment` column they will be expanded by
+    # the training/prediction code to construct the full feature matrix.
     features = pdf[["votes", "purchased", "time", "comment_len"]].astype(float)
     pdf_features = features.fillna(0.0)
+    # If BERT embeddings were attached and the caller requested to use them
+    # (handled by training/prediction code), those columns will be present in
+    # `pdf` and can be used when constructing feature matrices.
     pdf_final = pd.concat([pdf_features, pdf[["label"]].astype(float)], axis=1)
     return pdf_final
 
@@ -154,7 +207,15 @@ class MLP(nn.Module):
         return self.net(x)
 
 
-def predict_csv(spark: SparkSession, input_csv: str, model_path: Path = MODEL_PATH, report_path: Path | None = None) -> pd.DataFrame:
+def predict_csv(
+    spark: SparkSession,
+    input_csv: str,
+    model_path: Path = MODEL_PATH,
+    report_path: Path | None = None,
+    use_bert: bool = False,
+    bert_model_name: str = "all-MiniLM-L6-v2",
+    bert_cols: list[str] | None = None,
+) -> pd.DataFrame:
     # Read input and extract features; preserve `id` if present for submission format
     # Treat common textual null markers like 'NA' and empty strings as nulls
     # Use same robust CSV options for prediction inputs
@@ -193,7 +254,53 @@ def predict_csv(spark: SparkSession, input_csv: str, model_path: Path = MODEL_PA
 
     pdf = df2.toPandas()
     ids = pdf.get("id")
-    X = pdf[["votes", "purchased", "time", "comment_len"]].astype(float).values
+
+    # If requested, compute BERT embeddings for multiple prediction input columns
+    # and replace the original text values with embedding arrays so they can be
+    # expanded into numeric features below.
+    if bert_cols is None:
+        bert_cols = ["comment", "title", "prod_title", "prod_features"]
+
+    if use_bert:
+        try:
+            from sentence_transformers import SentenceTransformer
+
+            model_st = SentenceTransformer(bert_model_name)
+            for col in bert_cols:
+                if col in df.columns:
+                    try:
+                        texts = df.select(F.col(col)).toPandas()[col].fillna("").astype(str).tolist()
+                        pred_emb = model_st.encode(texts, show_progress_bar=False, convert_to_numpy=True)
+                        if pred_emb.shape[0] == len(pdf):
+                            pdf[col] = list(pred_emb)
+                        else:
+                            print(f"WARNING: prediction embedding count for '{col}' does not match rows; skipping")
+                    except Exception as ex:
+                        print(f"WARNING: failed to compute prediction embeddings for '{col}': {ex}")
+        except Exception as ex:
+            print(f"INFO: sentence-transformers not available for prediction: {ex}")
+
+    # Expand any embedded-array columns (from bert_cols) into numeric columns
+    # in the training/prediction order: votes, purchased, time, then all
+    # embedding dims for each bert column in bert_cols order.
+    feature_cols = ["votes", "purchased", "time"]
+    expanded = False
+    for col in (bert_cols or []):
+        if col in pdf.columns and pdf[col].dtype == object and len(pdf) > 0 and isinstance(pdf.iloc[0][col], (list, tuple, np.ndarray)):
+            first = next((v for v in pdf[col] if v is not None), None)
+            if first is not None:
+                emb_dim = int(len(first))
+                emb_cols = [f"{col}_emb_{i}" for i in range(emb_dim)]
+                emb_df = pd.DataFrame(list(pdf[col].fillna([0.0] * emb_dim)), columns=emb_cols)
+                emb_df.index = pdf.index
+                pdf = pd.concat([pdf, emb_df], axis=1)
+                feature_cols.extend(emb_cols)
+                expanded = True
+
+    if not expanded:
+        feature_cols.append("comment_len")
+
+    X = pdf[feature_cols].astype(float).values
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = MLP(input_dim=X.shape[1])
@@ -263,6 +370,9 @@ def load_config(path: str | Path) -> dict:
     cfg["model_path"] = cp.get("paths", "model_path", fallback=str(MODEL_PATH))
     cfg["report_path"] = cp.get("paths", "report_path", fallback=None)
     cfg["output_csv"] = cp.get("paths", "output_csv", fallback="prediction_output/prediction_result.csv")
+    # feature flags
+    cfg["use_bert"] = cp.getboolean("features", "use_bert", fallback=False)
+    cfg["bert_model"] = cp.get("features", "bert_model", fallback="all-MiniLM-L6-v2")
     return cfg
 
 
@@ -276,6 +386,8 @@ def main():
         cfg["input_csv"],
         model_path=Path(cfg["model_path"]),
         report_path=Path(cfg["report_path"]) if cfg.get("report_path") else None,
+        use_bert=cfg.get("use_bert", False),
+        bert_model_name=cfg.get("bert_model", "all-MiniLM-L6-v2"),
     )
 
     output = cfg.get("output_csv") or "prediction_output/prediction_result.csv"
