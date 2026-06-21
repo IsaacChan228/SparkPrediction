@@ -82,8 +82,8 @@ def load_and_preprocess(
     DataFrame of numeric features + `label` (when present).
 
     The function uses permissive CSV options to allow multiline quoted fields
-    and then applies column-level cleaning for `votes`, `time`, `purchased`,
-    and `comment_len`. Precomputed embedding columns (``<col>_emb_<i>``) are
+    and then applies column-level cleaning for `votes`, `time`, and `purchased`.
+    Precomputed embedding columns (``<col>_emb_<i>``) are
     detected later in the pandas frame and included automatically.
     """
 
@@ -129,13 +129,12 @@ def load_and_preprocess(
             votes_num,
             (F.when(F.upper(F.col("purchased")) == "TRUE", 1.0).otherwise(0.0)).alias("purchased"),
             time_num,
-            F.length(F.col("comment")).cast("double").alias("comment_len"),
             F.when(
                 F.regexp_replace(F.col("rating"), "[^0-9.]", "").rlike(r"^[1-5](\.0+)?$"),
                 F.regexp_replace(F.col("rating"), "[^0-9.]", "").cast("double"),
             ).otherwise(F.lit(None)).alias("rating"),
         )
-        .na.fill({"votes": 0.0, "time": 0.0, "comment_len": 0.0, "purchased": 0.0})
+        .na.fill({"votes": 0.0, "time": 0.0, "purchased": 0.0})
     )
 
     pdf = df2.toPandas()
@@ -148,15 +147,28 @@ def load_and_preprocess(
         if re.search(r"_emb_\d+$", c):
             # ensure numeric type
             pdf[c] = pd.to_numeric(full_pdf[c], errors="coerce").fillna(0.0)
+    # product-level features to include in prediction/training
+    if "prod_price" in full_pdf.columns:
+        pdf["prod_price"] = pd.to_numeric(full_pdf["prod_price"].astype(str).str.replace(r"[^0-9.\-]", "", regex=True), errors="coerce").fillna(0.0)
+    if "prod_rating_number" in full_pdf.columns:
+        pdf["prod_rating_number"] = pd.to_numeric(full_pdf["prod_rating_number"].astype(str).str.replace(r"[^0-9.\-]", "", regex=True), errors="coerce").fillna(0.0)
+    if "prod_main_category" in full_pdf.columns:
+        pdf["prod_main_category"] = pd.Categorical(full_pdf["prod_main_category"].fillna("")).codes.astype(float)
+    if "prod_store" in full_pdf.columns:
+        pdf["prod_store"] = pd.Categorical(full_pdf["prod_store"].fillna("")).codes.astype(float)
     # Note: any precomputed embedding columns with names like
     # '<col>_emb_<i>' will be detected and included in the numeric features
     # below; no on-the-fly BERT encoding is performed here.
-    # Drop rows without label and make an explicit copy to avoid chained-assignment warnings
-    pdf = pdf.dropna(subset=["rating"]).copy()
+    # Training requires a valid 'rating' for every row; raise if any are missing
+    if "rating" not in pdf.columns:
+        raise RuntimeError("Input CSV missing 'rating' column required for training")
+    n_missing = int(pdf["rating"].isnull().sum())
+    if n_missing > 0:
+        raise ValueError(f"Found {n_missing} rows with missing or invalid 'rating' — training requires ratings for all rows")
+    pdf = pdf.copy()
     pdf["label"] = pdf["rating"].astype(float)
     # Build numeric feature frame. If embedding columns exist they will be
-    # included in the order of `bert_cols`; otherwise fall back to
-    # `comment_len`.
+    # included in the order of `bert_cols`.
     # collect embedding columns if present
     def _collect_emb_cols(df: pd.DataFrame, bert_cols_list: list[str]) -> list[str]:
         emb_cols: list[str] = []
@@ -172,7 +184,11 @@ def load_and_preprocess(
                 emb_cols.extend(matches)
         return emb_cols
 
-    features = pdf[["votes", "purchased", "time"]].astype(float)
+    feat_cols = ["votes", "purchased", "time"]
+    for pc in ["prod_price", "prod_rating_number", "prod_main_category", "prod_store"]:
+        if pc in pdf.columns:
+            feat_cols.append(pc)
+    features = pdf[feat_cols].astype(float)
     pdf_features = features.fillna(0.0)
     emb_columns = _collect_emb_cols(pdf, bert_cols)
     # Require embeddings for the allowed columns; do not fall back to raw text
@@ -266,13 +282,30 @@ def predict_csv(
             votes_num,
             (F.when(F.upper(F.col("purchased")) == "TRUE", 1.0).otherwise(0.0)).alias("purchased"),
             time_num,
-            F.length(F.col("comment")).cast("double").alias("comment_len"),
         )
-        .na.fill({"votes": 0.0, "time": 0.0, "comment_len": 0.0, "purchased": 0.0})
+        .na.fill({"votes": 0.0, "time": 0.0, "purchased": 0.0})
     )
 
     pdf = df2.toPandas()
     ids = pdf.get("id")
+    # bring through embedding and product columns from the original raw frame
+    full_pdf = df.toPandas()
+    import re
+    for c in full_pdf.columns:
+        if re.search(r"_emb_\d+$", c):
+            pdf[c] = pd.to_numeric(full_pdf[c], errors="coerce").fillna(0.0)
+    # product-level features to include in prediction/training
+    prod_cols = ["prod_main_category", "prod_price", "prod_store", "prod_rating_number"]
+    # numeric product fields
+    if "prod_price" in full_pdf.columns:
+        pdf["prod_price"] = pd.to_numeric(full_pdf["prod_price"].astype(str).str.replace(r"[^0-9.\-]", "", regex=True), errors="coerce").fillna(0.0)
+    if "prod_rating_number" in full_pdf.columns:
+        pdf["prod_rating_number"] = pd.to_numeric(full_pdf["prod_rating_number"].astype(str).str.replace(r"[^0-9.\-]", "", regex=True), errors="coerce").fillna(0.0)
+    # categorical -> numeric codes
+    if "prod_main_category" in full_pdf.columns:
+        pdf["prod_main_category"] = pd.Categorical(full_pdf["prod_main_category"].fillna("")).codes.astype(float)
+    if "prod_store" in full_pdf.columns:
+        pdf["prod_store"] = pd.Categorical(full_pdf["prod_store"].fillna("")).codes.astype(float)
 
     # Precomputed embedding columns (named like '<col>_emb_<i>') will be used
     # when constructing the numeric feature matrix. No on-the-fly BERT
@@ -284,6 +317,9 @@ def predict_csv(
     # precomputed during preprocessing. Embedding dims are detected by column
     # name pattern '<col>_emb_<i>' and added in bert_cols order.
     feature_cols = ["votes", "purchased", "time"]
+    for pc in ["prod_price", "prod_rating_number", "prod_main_category", "prod_store"]:
+        if pc in pdf.columns:
+            feature_cols.append(pc)
     import re
 
     def _collect_emb_cols(df: pd.DataFrame, bert_cols_list: list[str]) -> list[str]:

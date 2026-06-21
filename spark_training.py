@@ -44,47 +44,32 @@ def train_model(
     will be detected and used automatically.
     """
     print("Preparing training data...")
-    # If preprocessing stored embeddings in any of the text columns (as arrays),
-    # expand them into numeric feature columns. We require embeddings for the
-    # allowed text columns and will raise if they are missing (no fallback).
+    # Only accept precomputed numeric embedding columns named '<col>_emb_<i>'
     bert_cols = ALLOWED_BERT_COLS
     feature_cols = ["votes", "purchased", "time"]
-    expanded = False
-    for col in bert_cols:
-        if col in data.columns and data[col].dtype == object and len(data) > 0 and isinstance(data.iloc[0][col], (list, tuple, np.ndarray)):
-            first = next((v for v in data[col] if v is not None), None)
-            if first is not None:
-                emb_dim = int(len(first))
-                emb_cols = [f"{col}_emb_{i}" for i in range(emb_dim)]
-                emb_df = pd.DataFrame(list(data[col].fillna([0.0] * emb_dim)), columns=emb_cols)
-                emb_df.index = data.index
-                data = pd.concat([data, emb_df], axis=1)
-                feature_cols.extend(emb_cols)
-                expanded = True
 
     # Detect numeric embedding columns stored in the dataframe
-    if not expanded:
-        emb_cols_detected: list[str] = []
-        for c in bert_cols:
-            prefix = f"{c}_emb_"
-            matches = [col for col in data.columns if col.startswith(prefix)]
-            if matches:
-                try:
-                    matches = sorted(matches, key=lambda x: int(x.rsplit("_", 1)[1]))
-                except Exception:
-                    matches = sorted(matches)
-                emb_cols_detected.extend(matches)
+    emb_cols_detected: list[str] = []
+    for c in bert_cols:
+        prefix = f"{c}_emb_"
+        matches = [col for col in data.columns if col.startswith(prefix)]
+        if matches:
+            try:
+                matches = sorted(matches, key=lambda x: int(x.rsplit("_", 1)[1]))
+            except Exception:
+                matches = sorted(matches)
+            emb_cols_detected.extend(matches)
 
-        if emb_cols_detected:
-            feature_cols.extend(emb_cols_detected)
-            expanded = True
+    if emb_cols_detected:
+        feature_cols.extend(emb_cols_detected)
+    else:
+        missing = [c for c in ALLOWED_BERT_COLS if not any(col.startswith(f"{c}_emb_") for col in data.columns)]
+        raise ValueError(f"Missing required embeddings for: {missing}. Run preprocessing (data_merging) to add <col>_emb_<i> numeric columns.")
 
-    # Require embeddings for the allowed columns; do not fall back to raw text
-    missing = [c for c in ALLOWED_BERT_COLS if not any(col.startswith(f"{c}_emb_") for col in data.columns) and not (
-        c in data.columns and data[c].dtype == object and len(data) > 0 and isinstance(data.iloc[0][c], (list, tuple, np.ndarray))
-    )]
-    if missing:
-        raise ValueError(f"Missing required embeddings for: {missing}. Run preprocessing (data_merging) to add <col>_emb_<i> columns or embed columns as arrays.")
+    # Include product-level features when present
+    for pc in ["prod_price", "prod_rating_number", "prod_main_category", "prod_store"]:
+        if pc in data.columns:
+            feature_cols.append(pc)
 
     X = data[feature_cols].astype(float).values
     y = data["label"].values
