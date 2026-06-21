@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from pathlib import Path
 import os
-from typing import Tuple
 import configparser
 
 import numpy as np
@@ -23,6 +22,9 @@ import pyspark.sql.functions as F
 
 
 MODEL_PATH = Path("Model/pytorch_mlp.pt")
+
+# Enforce these text columns must be represented by embeddings
+ALLOWED_BERT_COLS = ["comment", "title", "prod_title", "prod_features"]
 
 
 def get_spark(app_name: str = "spark-pytorch-mlp") -> SparkSession:
@@ -109,7 +111,7 @@ def load_and_preprocess(
     # will be handled later. Precomputed embedding columns (e.g. "comment_emb_0")
     # will be detected and used when building the numeric feature matrix.
     if bert_cols is None:
-        bert_cols = ["comment", "title", "prod_title", "prod_features"]
+        bert_cols = ALLOWED_BERT_COLS
 
     # Basic feature engineering: votes, purchased, time, comment length
     # Sanitize numeric input before casting to avoid failures when fields contain
@@ -137,6 +139,15 @@ def load_and_preprocess(
     )
 
     pdf = df2.toPandas()
+    # copy any precomputed embedding columns from the original CSV into the
+    # working pandas frame. This ensures '<col>_emb_<i>' columns are visible
+    # even though df2 selected sanitized numeric columns above.
+    full_pdf = df.toPandas()
+    import re
+    for c in full_pdf.columns:
+        if re.search(r"_emb_\d+$", c):
+            # ensure numeric type
+            pdf[c] = pd.to_numeric(full_pdf[c], errors="coerce").fillna(0.0)
     # Note: any precomputed embedding columns with names like
     # '<col>_emb_<i>' will be detected and included in the numeric features
     # below; no on-the-fly BERT encoding is performed here.
@@ -164,12 +175,13 @@ def load_and_preprocess(
     features = pdf[["votes", "purchased", "time"]].astype(float)
     pdf_features = features.fillna(0.0)
     emb_columns = _collect_emb_cols(pdf, bert_cols)
-    if emb_columns:
-        # ensure embedding columns are numeric and present
-        pdf_embs = pdf[emb_columns].astype(float).fillna(0.0)
-        pdf_features = pd.concat([pdf_features, pdf_embs], axis=1)
-    else:
-        pdf_features = pd.concat([pdf_features, pdf[["comment_len"]].astype(float).fillna(0.0)], axis=1)
+    # Require embeddings for the allowed columns; do not fall back to raw text
+    missing = [c for c in ALLOWED_BERT_COLS if not any(col.startswith(f"{c}_emb_") for col in pdf.columns)]
+    if missing:
+        raise RuntimeError(f"Missing required embedding columns for: {missing}. Run preprocessing (data_merging) to generate embeddings.")
+    # ensure embedding columns are numeric and present
+    pdf_embs = pdf[emb_columns].astype(float).fillna(0.0)
+    pdf_features = pd.concat([pdf_features, pdf_embs], axis=1)
     # If BERT embeddings were attached and the caller requested to use them
     # (handled by training/prediction code), those columns will be present in
     # `pdf` and can be used when constructing feature matrices.
@@ -266,7 +278,7 @@ def predict_csv(
     # when constructing the numeric feature matrix. No on-the-fly BERT
     # encoding is performed during prediction.
     if bert_cols is None:
-        bert_cols = ["comment", "title", "prod_title", "prod_features"]
+        bert_cols = ALLOWED_BERT_COLS
 
     # Build feature list by including any numeric embedding columns that were
     # precomputed during preprocessing. Embedding dims are detected by column
@@ -288,10 +300,10 @@ def predict_csv(
         return emb_cols
 
     emb_cols = _collect_emb_cols(pdf, bert_cols)
-    if emb_cols:
-        feature_cols.extend(emb_cols)
-    else:
-        feature_cols.append("comment_len")
+    missing = [c for c in ALLOWED_BERT_COLS if not any(col.startswith(f"{c}_emb_") for col in pdf.columns)]
+    if missing:
+        raise RuntimeError(f"Missing required embedding columns for: {missing}. Run preprocessing (data_merging) to generate embeddings.")
+    feature_cols.extend(emb_cols)
 
     X = pdf[feature_cols].astype(float).values
 

@@ -11,10 +11,8 @@ Prediction functionality is implemented in `spark_prediction.py`.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Tuple
-from contextlib import nullcontext
 import configparser
 import time
 
@@ -23,10 +21,10 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from pyspark.sql import SparkSession
-import pyspark.sql.functions as F
+from spark_prediction import MODEL_PATH, get_spark, load_and_preprocess, TabularDataset, MLP
 
-from spark_prediction import MODEL_PATH, get_spark, load_and_preprocess, TabularDataset, MLP, predict_csv
+# Enforce these text columns must be represented by embeddings
+ALLOWED_BERT_COLS = ["comment", "title", "prod_title", "prod_features"]
 
 
 def train_model(
@@ -47,8 +45,9 @@ def train_model(
     """
     print("Preparing training data...")
     # If preprocessing stored embeddings in any of the text columns (as arrays),
-    # expand them into numeric feature columns. Otherwise use `comment_len`.
-    bert_cols = ["comment", "title", "prod_title", "prod_features"]
+    # expand them into numeric feature columns. We require embeddings for the
+    # allowed text columns and will raise if they are missing (no fallback).
+    bert_cols = ALLOWED_BERT_COLS
     feature_cols = ["votes", "purchased", "time"]
     expanded = False
     for col in bert_cols:
@@ -63,8 +62,29 @@ def train_model(
                 feature_cols.extend(emb_cols)
                 expanded = True
 
+    # Detect numeric embedding columns stored in the dataframe
     if not expanded:
-        feature_cols.append("comment_len")
+        emb_cols_detected: list[str] = []
+        for c in bert_cols:
+            prefix = f"{c}_emb_"
+            matches = [col for col in data.columns if col.startswith(prefix)]
+            if matches:
+                try:
+                    matches = sorted(matches, key=lambda x: int(x.rsplit("_", 1)[1]))
+                except Exception:
+                    matches = sorted(matches)
+                emb_cols_detected.extend(matches)
+
+        if emb_cols_detected:
+            feature_cols.extend(emb_cols_detected)
+            expanded = True
+
+    # Require embeddings for the allowed columns; do not fall back to raw text
+    missing = [c for c in ALLOWED_BERT_COLS if not any(col.startswith(f"{c}_emb_") for col in data.columns) and not (
+        c in data.columns and data[c].dtype == object and len(data) > 0 and isinstance(data.iloc[0][c], (list, tuple, np.ndarray))
+    )]
+    if missing:
+        raise ValueError(f"Missing required embeddings for: {missing}. Run preprocessing (data_merging) to add <col>_emb_<i> columns or embed columns as arrays.")
 
     X = data[feature_cols].astype(float).values
     y = data["label"].values
