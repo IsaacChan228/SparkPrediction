@@ -27,3 +27,10 @@ prod_store (categorical → numeric codes, NaN → -1 code cast to float)
 embeddings: all numeric columns named <col>emb<i> in this bert order — comment, title, prod_title, prod_features (each group sorted by trailing index and appended)
 
 Label (not a feature): rating → label (float).
+
+To increase driver JVM memory or reduce shuffle load, set these beforehand in PowerShell:
+$env:SPARK_DRIVER_MEMORY='6g'
+$env:SPARK_DRIVER_MAX_RESULT_SIZE='3g'
+$env:SPARK_SQL_SHUFFLE_PARTITIONS='8'
+$env:SPARK_MASTER='local[*]'
+$env:SPARK_TO_PANDAS_BATCH_SIZE='10000'
