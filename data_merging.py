@@ -39,7 +39,7 @@ DEFAULT_TRAIN_TRAIN = Path("training_data/train_clean.csv")
 DEFAULT_PROD = Path("product_info/prodInfo_clean.csv")
 DEFAULT_OUT_PRED = Path("prediction_input/test_merged.csv")
 DEFAULT_OUT_TRAIN = Path("training_data/train_merged.csv")
-DEFAULT_EMB_DIM = 64
+DEFAULT_EMB_DIM = 32
 
 
 def merge_train_with_prod(
@@ -187,7 +187,8 @@ def merge_train_with_prod(
                         out_dim = emb_reduced.shape[1]
                         # persist compressor
                         try:
-                            np.savez_compressed(compressor_path, mean=mean, comp=comp)
+                            # persist as float32 to reduce disk and memory footprint
+                            np.savez_compressed(compressor_path, mean=mean.astype(np.float32), comp=comp.astype(np.float32))
                         except Exception as ex:
                             print(f"WARNING: failed to save compressor for '{col}': {ex}")
                         print(f"INFO: fitted and saved compressor for '{col}' (orig_dim={emb_dim}, written_dim={out_dim})")
@@ -217,16 +218,25 @@ def merge_train_with_prod(
                     for i, r in enumerate(out_rows):
                         vec = emb_reduced[i] if i < emb_reduced.shape[0] else np.zeros(out_dim, dtype=float)
                         for j, val in enumerate(vec):
-                            r[col_names[j]] = float(val)
+                            # round embedding numeric values to 6 decimal places to reduce CSV size
+                            try:
+                                r[col_names[j]] = float(round(float(val), 6))
+                            except Exception:
+                                r[col_names[j]] = float(val)
             except Exception as ex:
                 print(f"WARNING: failed to compute embeddings for '{col}': {ex}")
     except Exception as ex:
         print(f"INFO: sentence-transformers not available or failed to import: {ex}")
 
-    out_fields = list(train_fields) + prod_out_fields + emb_fieldnames
+    # Build a reduced output column list to avoid saving large unused text
+    # Keep: id, core numeric features, a small set of product numeric fields,
+    # any computed embedding columns, and rating (if present for training).
+    core_keep = [c for c in ("id", "votes", "purchased", "time", "rating") if c in train_fields]
+    prod_keep = [c for c in ("prod_price", "prod_rating_number", "prod_main_category", "prod_store") if c in prod_out_fields]
+    out_fields = core_keep + prod_keep + emb_fieldnames
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"Writing {len(out_rows)} merged rows to {output_path}")
+    print(f"Writing {len(out_rows)} reduced merged rows to {output_path}")
     with output_path.open("w", encoding="utf-8", newline="") as out:
         writer = csv.DictWriter(out, fieldnames=out_fields)
         writer.writeheader()

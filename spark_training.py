@@ -71,8 +71,8 @@ def train_model(
         if pc in data.columns:
             feature_cols.append(pc)
 
-    X = data[feature_cols].astype(float).values
-    y = data["label"].values
+    X = data[feature_cols].astype(np.float32).values
+    y = data["label"].astype(np.float32).values
 
     # Diagnostics removed to reduce noisy output
 
@@ -313,6 +313,34 @@ def main():
     print(f"Preprocessing input CSV: {train_csv}")
     pre_start = time.perf_counter()
     df = load_and_preprocess(spark, train_csv)
+    # Reduce dataframe to only feature + label columns to minimize driver memory
+    # Detect embedding columns and product feature cols, mirror train_model logic
+    bert_cols = ALLOWED_BERT_COLS
+    emb_columns: list[str] = []
+    for c in bert_cols:
+        prefix = f"{c}_emb_"
+        matches = [col for col in df.columns if col.startswith(prefix)]
+        if matches:
+            try:
+                matches = sorted(matches, key=lambda x: int(x.rsplit("_", 1)[1]))
+            except Exception:
+                matches = sorted(matches)
+            emb_columns.extend(matches)
+
+    feature_cols = ["votes", "purchased", "time"]
+    for pc in ["prod_price", "prod_rating_number", "prod_main_category", "prod_store"]:
+        if pc in df.columns:
+            feature_cols.append(pc)
+    feature_cols.extend(emb_columns)
+
+    # Keep only features + label and downcast numeric dtypes to float32 to save memory
+    keep_cols = [c for c in feature_cols if c in df.columns] + ["label"]
+    try:
+        df = df[keep_cols].astype(dtype="float32")
+    except Exception:
+        # fallback: leave as-is if casting fails
+        pass
+
     pre_time = time.perf_counter() - pre_start
     try:
         print(f"Preprocessing completed: {len(df)} rows (took {pre_time:.2f}s)")

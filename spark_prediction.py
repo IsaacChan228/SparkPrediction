@@ -275,7 +275,9 @@ def predict_csv(
         .na.fill({"votes": 0.0, "time": 0.0, "purchased": 0.0})
     )
 
-    pdf = df2.toPandas()
+    # materialize only the small numeric core to pandas (select exact columns)
+    core_cols = [c for c in ("id", "votes", "purchased", "time") if c in df2.columns]
+    pdf = df2.select(*core_cols).toPandas()
     ids = pdf.get("id")
 
     # materialize only embedding/product columns from the raw frame
