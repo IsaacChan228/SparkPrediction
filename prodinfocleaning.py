@@ -1,27 +1,26 @@
 """Product-info cleaning utilities.
 
-This module reads the canonical schema from ``product_info/prod_info_format.cfg`` 
-and validates rows in ``product_info/prodInfo.csv``.
+Reads the canonical schema at ``product_info/prod_info_format.cfg`` and
+validates the rows in ``product_info/prodInfo.csv``. The module focuses on
+detecting malformed or missing semantic fields, normalizing benign issues,
+and exporting a cleaned CSV suitable for downstream processing.
 
-Checks performed:
+Validation highlights:
+- Ensures row column count matches the schema.
+- Detects missing values (but tolerates and normalizes some fields).
+- Validates `id` is an integer and `parent_prod_id` follows the expected
+    identifier pattern.
+- Ensures `rating_number` is an integer; negative values are normalized to 0.
 
-* fewer attributes than the schema
-* more attributes than the schema
-* missing or empty attribute values (except allowed fields)
-* malformed semantic fields:
-    - `id` must be an integer
-    - `parent_prod_id` must match pattern a_[A-Za-z0-9]{16}
-    - `rating_number` must be a non-negative integer
+Normalization and sanitation:
+- Empty `title`, `price`, `main_category`, and `store` fields are set to
+    the placeholder "NA" rather than treated as corruption.
+- Text fields are sanitized to remove undecodable/control characters.
 
-Corrections / normalizations applied:
-
-* Empty `title`, `price`, `main_category`, and `store` fields are set to "NA"
-* Text fields are sanitized to remove undecodable characters
-
-Output:
-The `clean_prod_csv` function writes a cleaned CSV containing valid rows.
-If `DEBUG_EXPORT_CORRUPTED` is True, corrupted rows with reasons are written
-to a separate CSV with suffix "_corrupted.csv".
+Outputs:
+- `clean_prod_csv()` writes the cleaned CSV to the supplied `output_path`.
+- When `DEBUG_EXPORT_CORRUPTED` is True, corrupted rows are written to
+    a sibling file with the suffix `_corrupted.csv` including reasons.
 """
 
 from __future__ import annotations
@@ -40,6 +39,7 @@ from traindatacleaning import (
     _PARENT_PROD_ID_RE,
     DEBUG_EXPORT_CORRUPTED,
 )
+from traindatacleaning import _print_progress
 
 
 DEFAULT_PROD_PATH = Path("product_info/prodInfo.csv")
@@ -60,9 +60,9 @@ class ProdCleaningResult:
 def _detect_corrupted_row_worker(args: tuple) -> List[str]:
     """Worker wrapper for parallel row validation.
 
-    Accepts either a sequence (list of fields) or a mapping (dict from header
-    name to value) as the row input so the parallel worker is tolerant to the
-    CSV reader used upstream.
+    Accepts either a positional sequence (list of field values) or a mapping
+    (dict from header name to value). This wrapper unifies the input for the
+    downstream `detect_corrupted_row` function used by worker processes.
     """
     row, expected = args
     return detect_corrupted_row(row, expected)
@@ -71,12 +71,11 @@ def _detect_corrupted_row_worker(args: tuple) -> List[str]:
 def detect_corrupted_row(row: object, expected_fields: Sequence[str]) -> List[str]:
     """Return a list of corruption reasons for a parsed CSV row.
 
-    Validates that the row has the correct number of attributes, no missing values
-    (except allowed fields like title, price, main_category, store), proper id format,
-    parent_prod_id format, and rating_number is a non-negative integer.
-    
-    Accepts either a sequence of values (positional CSV row) or a mapping-like
-    object (e.g. `csv.DictReader` row).
+    The function accepts either a positional sequence (list/tuple of values)
+    or a mapping-like object (for example a `csv.DictReader` row). Mapping
+    inputs are checked for unexpected keys; sequence inputs are validated by
+    length and positional semantics. Non-fatal issues are normalized in-place
+    when possible so the parent process sees corrected values.
     """
     problems: List[str] = []
     expected_count = len(expected_fields)
@@ -163,10 +162,12 @@ def clean_prod_csv(
     max_workers: int | None = None,
 ) -> ProdCleaningResult:
     """Write a cleaned product CSV that excludes corrupted rows.
-    
-    Parses the product CSV, validates each row against the schema using parallel
-    processing, and writes only valid rows to the output file. Optionally exports
-    corrupted rows with corruption reasons to a separate file.
+
+    Parses the product CSV into logical rows, pads short rows to the expected
+    schema length, validates rows (optionally in parallel), sanitizes text
+    fields, normalizes non-fatal issues, and writes a clean CSV ready for
+    downstream consumption. Corrupted rows and reasons are exported when
+    ``DEBUG_EXPORT_CORRUPTED`` is enabled.
     """
     expected_fields = load_expected_fields(schema_path)
     csv_path = Path(csv_path)
@@ -177,9 +178,13 @@ def clean_prod_csv(
 
     text = csv_path.read_text(encoding="utf-8", errors="replace")
     parts = text.splitlines()
-    # skip header
+    # Skip header and parse each non-empty input line. Show a single-line
+    # progress update during parsing to give feedback on large files.
     rows = []
-    for line in parts[1:]:
+    total_lines = max(0, len(parts) - 1)
+    for idx, line in enumerate(parts[1:], start=1):
+        if idx % 50 == 0 or idx == total_lines:
+            _print_progress(idx, total_lines, prefix="Parsing product rows")
         if not line.strip():
             continue
         try:
@@ -192,13 +197,23 @@ def clean_prod_csv(
         rows.append(parsed)
 
     if not max_workers or max_workers <= 1:
-        # Synchronous validation to avoid spawning worker processes.
-        problems_list = [detect_corrupted_row(row, expected_fields) for row in rows]
+        # Synchronous validation (single-process) to avoid process spawn
+        # overhead for small files or when the caller explicitly requests it.
+        problems_list = []
+        total_rows = len(rows)
+        for i, row in enumerate(rows, start=1):
+            problems_list.append(detect_corrupted_row(row, expected_fields))
+            if i % 50 == 0 or i == total_rows:
+                _print_progress(i, total_rows, prefix="Validating product rows")
     else:
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            problems_list = list(
-                executor.map(_detect_corrupted_row_worker, zip(rows, [expected_fields] * len(rows)), chunksize=256)
-            )
+            problems_list = []
+            total_rows = len(rows)
+            it = executor.map(_detect_corrupted_row_worker, zip(rows, [expected_fields] * len(rows)), chunksize=256)
+            for i, p in enumerate(it, start=1):
+                problems_list.append(p)
+                if i % 50 == 0 or i == total_rows:
+                    _print_progress(i, total_rows, prefix="Validating product rows")
 
     input_rows = 0
     clean_rows = 0
@@ -218,8 +233,11 @@ def clean_prod_csv(
             corrupted_writer = csv.writer(corrupted_handle, delimiter=',')
             corrupted_writer.writerow([*expected_fields, "corruption_reasons"])
 
+        total_rows = len(rows)
         for row, problems in zip(rows, problems_list):
             input_rows += 1
+            if input_rows % 50 == 0 or input_rows == total_rows:
+                _print_progress(input_rows, total_rows, prefix="Writing product output")
             if problems:
                 corrupted_rows += 1
                 if corrupted_writer is not None:

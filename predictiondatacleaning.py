@@ -1,30 +1,15 @@
 """Prediction-data cleaning utilities.
 
-This module reads the canonical schema from ``prediction_input/prediction_data_format.cfg``
-and uses it to detect and clean corrupted rows in ``test.csv`` (prediction set).
+Reads the canonical schema at ``prediction_input/prediction_data_format.cfg`` and
+cleans ``prediction_input/test.csv`` for prediction/preprocessing steps. The
+module detects malformed rows, applies safe normalizations, and writes a
+cleaned CSV plus an optional corrupted-rows CSV with reasons.
 
-Corruption Detection:
-A row is considered corrupted when it has:
-
-* fewer attributes than the schema
-* more attributes than the schema
-* missing or empty attribute values (except 'comment' field)
-* malformed semantic fields:
-    - user_id: must match pattern u_[A-Za-z0-9]{16}
-    - prod_id: must match pattern a_[A-Za-z0-9]{16}
-    - parent_prod_id: must match pattern a_[A-Za-z0-9]{16}
-    - purchased: must be TRUE or FALSE
-    - votes: must be a non-negative integer
-
-Corrections Applied:
-* Negative vote counts are normalized to 0
-* Empty 'comment' fields are normalized to "NA"
-* Misaligned tail fields (comment, time, votes, purchased) are extracted and realigned
-* Extra fields beyond expected count are merged into the comment field
-
-Output:
-The main cleaning helper writes a filtered CSV containing only valid rows.
-Corrupted rows are exported to a separate CSV file with detailed corruption reasons.
+Key behaviors:
+- Ensures column count matches the schema and required semantic formats.
+- Normalizes non-fatal issues (negative `votes` -> 0, empty `comment` -> "NA").
+- Repairs common quoting/merging corruptions where tail fields are absorbed
+    into the `comment` cell and merges extra columns into the `comment` text.
 """
 
 from __future__ import annotations
@@ -38,6 +23,7 @@ from pathlib import Path
 from itertools import repeat
 from typing import Iterable, Iterator, List, Sequence, Tuple, Mapping
 
+from traindatacleaning import _print_progress
 
 DEFAULT_TRAIN_PATH = Path("prediction_input/test.csv")
 DEFAULT_SCHEMA_PATH = Path("prediction_input/prediction_data_format.cfg")
@@ -68,9 +54,10 @@ class CleaningResult:
 
 def _detect_corrupted_row_worker(args: Tuple[object, Sequence[str]]) -> List[str]:
     """Worker wrapper for parallel row validation.
-    Accepts either a sequence (list of fields) or a mapping (dict from header
-    name to value) as the row input so the parallel worker is tolerant to the
-    CSV reader used upstream.
+
+    Accepts either a positional sequence (list of field values) or a mapping
+    (dict from header name to value). This wrapper normalizes the input shape
+    and forwards it to :func:`detect_corrupted_row` for the actual checks.
     """
 
     row, expected_fields = args
@@ -91,7 +78,12 @@ def _sanitize_text_field(value: str) -> str:
 
 
 def load_expected_fields(schema_path: Path | str = DEFAULT_SCHEMA_PATH) -> List[str]:
-    """Read the expected prediction columns from the schema file."""
+    """Read the expected prediction column names from the schema file.
+
+    The schema file is expected to list fields as lines like ``name: type``;
+    this function extracts the `name` tokens and validates they match a
+    simple identifier pattern.
+    """
 
     schema_path = Path(schema_path)
     if not schema_path.exists():
@@ -117,9 +109,12 @@ def load_expected_fields(schema_path: Path | str = DEFAULT_SCHEMA_PATH) -> List[
 def detect_corrupted_row(row: object, expected_fields: Sequence[str]) -> List[str]:
     """Return a list of corruption reasons for a parsed CSV row.
 
-    Accepts either a sequence of values (positional CSV row) or a mapping-like
-    object (e.g. `csv.DictReader` row). Mapping inputs will be checked for
-    unexpected keys (extra attributes) similar to the older implementation.
+    Accepts either a positional sequence (list/tuple of values) or a
+    mapping-like object (for example a `csv.DictReader` row). Mapping inputs
+    are checked for unexpected keys; sequence inputs are validated by length
+    and positional semantics. Where appropriate the function will normalize
+    non-fatal issues in-place (for example capping negative counts) so the
+    parent process sees corrected values.
     """
 
     problems: List[str] = []
@@ -233,10 +228,12 @@ def iter_clean_rows(
     schema_path: Path | str = DEFAULT_SCHEMA_PATH,
     max_workers: int | None = None,
 ) -> Iterator[List[str]]:
-    """Yield only rows that match the training schema exactly.
+    """Yield only rows that match the prediction schema.
 
-    When ``max_workers`` is provided and greater than 1, row validation is
-    performed in parallel using :class:`concurrent.futures.ProcessPoolExecutor`.
+    When ``max_workers`` > 1, validation is performed in parallel using
+    :class:`concurrent.futures.ProcessPoolExecutor`. The streaming path is
+    preserved when no workers are requested to avoid loading the entire file
+    into memory.
     """
 
     expected_fields = load_expected_fields(schema_path)
@@ -246,7 +243,7 @@ def iter_clean_rows(
         raise FileNotFoundError(f"Prediction CSV not found: {csv_path}")
 
     # For small/streaming consumption keep the original streaming path when
-    # no parallel workers are requested.
+    # no parallel workers are requested (avoids loading the entire file).
     if not max_workers or max_workers <= 1:
         with csv_path.open(encoding=CSV_ENCODING, errors=CSV_ERRORS, newline="") as handle:
             reader = csv.reader(handle, delimiter=',')
@@ -323,7 +320,8 @@ def clean_training_csv(
         # Split the remainder into logical record chunks using a robust
         # pattern: a newline followed by an id and a user_id (u_....). This
         # catches cases where the CSV parser has joined multiple records due
-        # to malformed quoting.
+        # to malformed quoting. We then reparsethe chunk with the CSV reader
+        # and apply heuristics to repair common corruption patterns.
         record_chunks = re.split(r"\n(?=\d+,u_[A-Za-z0-9]{16},)", rest)
 
         rows = []
@@ -331,7 +329,11 @@ def clean_training_csv(
             r"(?P<comment>.*?),(?P<time>[0-9Ee.+-]+),(?P<votes>\d+),(?P<purchased>TRUE|FALSE|True|False|true|false)$",
             re.DOTALL,
         )
-        for chunk in record_chunks:
+        total_chunks = len(record_chunks)
+        for idx, chunk in enumerate(record_chunks, start=1):
+            if idx % 50 == 0 or idx == total_chunks:
+                _print_progress(idx, total_chunks, prefix="Parsing records")
+
             chunk = chunk.strip("\n")
             if not chunk:
                 continue
@@ -341,7 +343,9 @@ def clean_training_csv(
                 parsed = [c for c in chunk.split(",")]
 
             # If the parsed row is short but the last field contains the
-            # expected tail tokens (time,votes,purchased), extract them.
+            # expected tail tokens (time,votes,purchased), extract them and
+            # rebuild the parsed row so downstream validation sees the
+            # expected columns.
             if len(parsed) < expected_count and parsed:
                 last = parsed[-1]
                 m = tail_re.match(last)
@@ -353,10 +357,10 @@ def clean_training_csv(
                     new_row = parsed[:-1] + [comment_part, time_part, votes_part, purchased_part]
                     parsed = new_row
 
-            # misaligned tail fields when the numeric/boolean fields appear
-            # shifted into the comment.
+            # Attempt to repair misaligned tail fields when the numeric/boolean
+            # fields were shifted into the comment field.
             row = list(parsed)
-            # Merge extras into comment if present
+            # Merge extras into comment if present to preserve free-form text.
             while len(row) > expected_count:
                 try:
                     nxt = row[comment_idx + 1]
@@ -411,9 +415,9 @@ def clean_training_csv(
 
                         row[comment_idx] = " ".join(new_tokens)
 
-            # Additional heuristic: if purchased is shifted left into
-            # positions 6/7 and comment ends with time+votes tokens, move them
-            # right and extract time/votes from the comment tail.
+            # Additional heuristic: if `purchased` is shifted left into
+            # positions 6/7 and the comment ends with `time votes`, move them
+            # right and extract the tokens from the comment tail.
             try:
                 tokens2 = [t for t in re.split(r"[\s,]+", str(row[comment_idx]).strip()) if t]
                 if len(tokens2) >= 2 and len(row) >= 8:
@@ -456,9 +460,9 @@ def clean_training_csv(
             row[comment_idx] = f"{row[comment_idx]} {nxt}"
             del row[comment_idx + 1]
 
-        # Heuristic: if numeric/boolean tail fields (time, votes, purchased)
-        # were accidentally absorbed into the comment due to bad
-        # quoting, try to extract them back from the end of the comment.
+            # Heuristic: if numeric/boolean tail fields (time, votes, purchased)
+            # were accidentally absorbed into the comment due to bad
+            # quoting, try to extract them back from the end of the comment.
         try:
             # Only attempt when we have at least the comment field
             comment_text = row[comment_idx] if len(row) > comment_idx else ""
@@ -530,13 +534,17 @@ def clean_training_csv(
                 row[comment_idx] = "NA"
 
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        problems_list = list(
-            executor.map(
-                _detect_corrupted_row_worker,
-                zip(rows, repeat(expected_fields)),
-                chunksize=256,
-            )
+        problems_list = []
+        total_rows = len(rows)
+        it = executor.map(
+            _detect_corrupted_row_worker,
+            zip(rows, repeat(expected_fields)),
+            chunksize=256,
         )
+        for i, p in enumerate(it, start=1):
+            problems_list.append(p)
+            if i % 50 == 0 or i == total_rows:
+                _print_progress(i, total_rows, prefix="Validating rows")
 
     # If the CSV header doesn't match the expected schema, mark every row as
     # corrupted with an explicit reason so it's obvious the file header is bad.
@@ -569,8 +577,12 @@ def clean_training_csv(
             corrupted_writer = csv.writer(corrupted_handle)
             corrupted_writer.writerow([*expected_fields, "corruption_reasons"])
 
+        total_rows = len(rows)
         for row, problems in zip(rows, problems_list):
             input_rows += 1
+            if input_rows % 50 == 0 or input_rows == total_rows:
+                _print_progress(input_rows, total_rows, prefix="Writing output")
+
             if problems:
                 corrupted_rows += 1
                 if corrupted_writer is not None:
@@ -578,6 +590,7 @@ def clean_training_csv(
                         corrupted_writer.writerow([*(row.get(f) for f in expected_fields), "; ".join(problems)])
                     else:
                         corrupted_writer.writerow([*row, "; ".join(problems)])
+                continue
 
             # Use the original id as-is; do not attempt to correct or deduplicate
             raw_id = row.get("id") if isinstance(row, dict) else row[0]

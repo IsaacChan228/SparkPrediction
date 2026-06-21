@@ -281,7 +281,6 @@ def load_config(path: str | Path) -> dict:
     cfg["model_path"] = cp.get("paths", "model_path", fallback=str(MODEL_PATH))
     cfg["report_path"] = cp.get("paths", "report_path", fallback="prediction_output/training_report.txt")
     # feature flags
-    cfg["use_bert"] = cp.getboolean("features", "use_bert", fallback=False)
     cfg["bert_model"] = cp.get("features", "bert_model", fallback="all-MiniLM-L6-v2")
 
     return cfg
@@ -305,7 +304,7 @@ def main():
     # measure preprocessing time
     print(f"Preprocessing input CSV: {train_csv}")
     pre_start = time.perf_counter()
-    df = load_and_preprocess(spark, train_csv, use_bert=cfg.get("use_bert", False), bert_model_name=cfg.get("bert_model", "all-MiniLM-L6-v2"))
+    df = load_and_preprocess(spark, train_csv)
     pre_time = time.perf_counter() - pre_start
     try:
         print(f"Preprocessing completed: {len(df)} rows (took {pre_time:.2f}s)")

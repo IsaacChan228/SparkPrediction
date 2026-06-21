@@ -1,31 +1,23 @@
 """Training-data cleaning utilities.
 
-This module reads the canonical schema from ``training_data/training_data_format.cfg`` 
-and uses it to detect and clean corrupted rows in ``train.csv``.
+Reads the canonical schema in ``training_data/training_data_format.cfg`` and
+cleans ``training_data/train.csv`` producing a cleaned CSV and an optional
+corrupted-rows CSV with reasons.
 
-Corruption Detection:
-A row is considered corrupted when it has:
-
-* fewer attributes than the schema
-* more attributes than the schema
-* missing or empty attribute values (except 'comment' field)
-* malformed semantic fields:
-  - user_id: must match pattern u_[A-Za-z0-9]{16}
-  - prod_id: must match pattern a_[A-Za-z0-9]{16}
-  - parent_prod_id: must match pattern a_[A-Za-z0-9]{16}
-  - purchased: must be TRUE or FALSE
-  - rating: must be an integer between 1 and 5
-  - votes: must be a non-negative integer
-
-Corrections Applied:
-* Negative vote counts are normalized to 0
-* Empty 'comment' fields are normalized to "NA"
-* Misaligned tail fields (comment, time, votes, purchased, rating) are extracted and realigned
-* Extra fields beyond expected count are merged into the comment field
+Key behaviors:
+- Detects malformed or missing semantic fields (user_id, prod_id,
+    parent_prod_id, purchased, rating, votes) and rows with incorrect column
+    counts.
+- Normalizes non-fatal issues: negative `votes` -> 0, empty `comment` -> "NA".
+- Repairs misaligned tail fields when time/votes/purchased/rating have been
+    absorbed into the `comment` cell or shifted; extra fields are merged into
+    the `comment` text.
+- Supports parallel row validation via :class:`concurrent.futures.ProcessPoolExecutor`.
 
 Output:
-The main cleaning helper writes a filtered CSV containing only valid rows.
-Corrupted rows are exported to a separate CSV file with detailed corruption reasons.
+- Writes cleaned rows to `training_data/train_clean.csv` (by default).
+- When `DEBUG_EXPORT_CORRUPTED` is enabled, writes corrupted rows and the
+    associated reasons to `training_data/train_clean_corrupted.csv`.
 """
 
 from __future__ import annotations
@@ -33,6 +25,8 @@ from __future__ import annotations
 import csv
 import os
 import re
+import sys
+import time
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -69,9 +63,10 @@ class CleaningResult:
 
 def _detect_corrupted_row_worker(args: Tuple[object, Sequence[str]]) -> List[str]:
     """Worker wrapper for parallel row validation.
-    Accepts either a sequence (list of fields) or a mapping (dict from header
-    name to value) as the row input so the parallel worker is tolerant to the
-    CSV reader used upstream.
+
+    Accepts either a positional sequence (list of field values) or a mapping
+    (dict from header name to value). This wrapper unifies the input for the
+    downstream `detect_corrupted_row` function used by worker processes.
     """
 
     row, expected_fields = args
@@ -79,7 +74,11 @@ def _detect_corrupted_row_worker(args: Tuple[object, Sequence[str]]) -> List[str
 
 
 def _sanitize_text_field(value: str) -> str:
-    """Replace undecodable or invalid text markers with spaces."""
+    """Replace undecodable or invalid text markers with a space.
+
+    This removes surrogate code points and control characters that can break
+    downstream processing or produce invalid CSV output.
+    """
 
     cleaned = []
     for ch in str(value):
@@ -92,7 +91,11 @@ def _sanitize_text_field(value: str) -> str:
 
 
 def load_expected_fields(schema_path: Path | str = DEFAULT_SCHEMA_PATH) -> List[str]:
-    """Read the expected training columns from the schema file."""
+    """Read the expected training column names from the schema file.
+
+    The schema file lists fields as `name: type` lines; this function extracts
+    and validates the `name` tokens.
+    """
 
     schema_path = Path(schema_path)
     if not schema_path.exists():
@@ -118,16 +121,17 @@ def load_expected_fields(schema_path: Path | str = DEFAULT_SCHEMA_PATH) -> List[
 def detect_corrupted_row(row: object, expected_fields: Sequence[str]) -> List[str]:
     """Return a list of corruption reasons for a parsed CSV row.
 
-    Accepts either a sequence of values (positional CSV row) or a mapping-like
-    object (e.g. `csv.DictReader` row). Mapping inputs will be checked for
-    unexpected keys (extra attributes) similar to the older implementation.
+    The function accepts either a positional sequence (list/tuple of values)
+    or a mapping-like object (for example a `csv.DictReader` row). Mapping
+    inputs are checked for unexpected keys; sequence inputs are validated by
+    length and positional semantics.
     """
 
     problems: List[str] = []
     expected_count = len(expected_fields)
 
-    # If the row is mapping-like (DictReader), check for unexpected keys and
-    # then extract values in the expected field order for validation below.
+    # If the row is mapping-like (DictReader), check for unexpected keys then
+    # extract values into the expected field order for validation below.
     if isinstance(row, Mapping):
         extra_keys = []
         for key in row.keys():
@@ -161,7 +165,7 @@ def detect_corrupted_row(row: object, expected_fields: Sequence[str]) -> List[st
             return problems
 
     # Validate missing/blank attributes. Allow an empty `comment` field and
-    # normalize it to the literal "NA" when possible.
+    # normalize it to the literal "NA" so empty comments are treated as valid.
     for idx, (field_name, value) in enumerate(zip(expected_fields, row_values)):
         if field_name == "comment":
             if value is None or str(value).strip() == "":
@@ -237,15 +241,40 @@ def detect_corrupted_row(row: object, expected_fields: Sequence[str]) -> List[st
     return problems
 
 
+def _print_progress(current: int, total: int | None = None, prefix: str = "") -> None:
+    """Print a single-line updating progress message to the terminal.
+
+    Uses carriage-return updates so the progress appears on one line.
+    When ``total`` is provided a percentage is shown. A final newline is
+    printed when ``current`` >= ``total``.
+    """
+
+    try:
+        if total and total > 0:
+            pct = (current / total) * 100
+            msg = f"{prefix} {current}/{total} ({pct:5.1f}%)"
+        else:
+            msg = f"{prefix} {current}"
+        sys.stdout.write("\r" + msg)
+        sys.stdout.flush()
+        if total and current >= total:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+    except Exception:
+        # Never fail the pipeline due to progress printing
+        pass
+
+
 def iter_clean_rows(
     csv_path: Path | str = DEFAULT_TRAIN_PATH,
     schema_path: Path | str = DEFAULT_SCHEMA_PATH,
     max_workers: int | None = None,
 ) -> Iterator[List[str]]:
-    """Yield only rows that match the training schema exactly.
+    """Yield only rows that match the training schema.
 
-    When ``max_workers`` is provided and greater than 1, row validation is
-    performed in parallel using :class:`concurrent.futures.ProcessPoolExecutor`.
+    If ``max_workers`` > 1, validation is performed in parallel using
+    :class:`concurrent.futures.ProcessPoolExecutor`. When running in parallel
+    we read all rows first to preserve original order for the result iterator.
     """
 
     expected_fields = load_expected_fields(schema_path)
@@ -254,8 +283,8 @@ def iter_clean_rows(
     if not csv_path.exists():
         raise FileNotFoundError(f"Training CSV not found: {csv_path}")
 
-    # For small/streaming consumption keep the original streaming path when
-    # no parallel workers are requested.
+    # For small or streaming consumption keep the streaming reader path when
+    # no parallel workers are requested (avoids loading the entire file).
     if not max_workers or max_workers <= 1:
         with csv_path.open(encoding=CSV_ENCODING, errors=CSV_ERRORS, newline="") as handle:
             reader = csv.reader(handle, delimiter=',')
@@ -270,8 +299,8 @@ def iter_clean_rows(
                     yield row
 
     else:
-        # Read all rows first so we can validate them in parallel while
-        # preserving original order.
+        # Read all rows first so they can be validated in parallel and
+        # results can be produced in the original input order.
         rows: List[List[str]] = []
         with csv_path.open(encoding=CSV_ENCODING, errors=CSV_ERRORS, newline="") as handle:
             reader = csv.reader(handle, delimiter=',')
@@ -329,10 +358,11 @@ def clean_training_csv(
         header_line = parts[0]
         rest = "\n".join(parts[1:])
 
-        # Split the remainder into logical record chunks using a robust
-        # pattern: a newline followed by an id and a user_id (u_....). This
-        # catches cases where the CSV parser has joined multiple records due
-        # to malformed quoting.
+            # Split the remainder into logical record chunks using a robust
+            # pattern: a newline followed by an id and a user_id (u_....). This
+            # catches cases where the CSV parser has joined multiple records due
+            # to malformed quoting. We then attempt to reparsing the chunk with
+            # the CSV reader and apply heuristics to fix common corruption patterns.
         record_chunks = re.split(r"\n(?=\d+,u_[A-Za-z0-9]{16},)", rest)
 
         rows = []
@@ -340,7 +370,12 @@ def clean_training_csv(
             r"(?P<comment>.*?),(?P<time>[0-9Ee.+-]+),(?P<votes>\d+),(?P<purchased>TRUE|FALSE|True|False|true|false),(?P<rating>\d+)$",
             re.DOTALL,
         )
-        for chunk in record_chunks:
+        total_chunks = len(record_chunks)
+        for idx, chunk in enumerate(record_chunks, start=1):
+            # update parsing progress intermittently
+            if idx % 50 == 0 or idx == total_chunks:
+                _print_progress(idx, total_chunks, prefix="Parsing records")
+
             chunk = chunk.strip("\n")
             if not chunk:
                 continue
@@ -364,10 +399,11 @@ def clean_training_csv(
                     parsed = new_row
 
             # Ensure we have exactly expected_count or attempt to repair
-            # misaligned tail fields when the numeric/boolean fields appear
-            # shifted into the comment.
+            # misaligned tail fields when numeric/boolean fields were shifted
+            # into the comment field.
             row = list(parsed)
-            # Merge extras into comment if present
+            # Merge any extra fields into the comment to preserve text and
+            # keep the row length consistent with the schema.
             while len(row) > expected_count:
                 try:
                     nxt = row[comment_idx + 1]
@@ -594,13 +630,17 @@ def clean_training_csv(
                 row[comment_idx] = "NA"
 
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        problems_list = list(
-            executor.map(
-                _detect_corrupted_row_worker,
-                zip(rows, repeat(expected_fields)),
-                chunksize=256,
-            )
+        problems_list = []
+        total_rows = len(rows)
+        it = executor.map(
+            _detect_corrupted_row_worker,
+            zip(rows, repeat(expected_fields)),
+            chunksize=256,
         )
+        for i, p in enumerate(it, start=1):
+            problems_list.append(p)
+            if i % 50 == 0 or i == total_rows:
+                _print_progress(i, total_rows, prefix="Validating rows")
 
     # If the CSV header doesn't match the expected schema, mark every row as
     # corrupted with an explicit reason so it's obvious the file header is bad.
@@ -645,8 +685,11 @@ def clean_training_csv(
             corrupted_writer = csv.writer(corrupted_handle)
             corrupted_writer.writerow([*expected_fields, "corruption_reasons"])
 
+        total_rows = len(rows)
         for row, problems in zip(rows, problems_list):
             input_rows += 1
+            if input_rows % 50 == 0 or input_rows == total_rows:
+                _print_progress(input_rows, total_rows, prefix="Writing output")
             if problems:
                 corrupted_rows += 1
                 if corrupted_writer is not None:
@@ -767,12 +810,12 @@ def clean_training_csv(
 
 def main() -> None:
     """CLI entry point for cleaning training data."""
-    # choose half of available CPU cores when possible, otherwise fallback to 1
+    # choose available CPU cores - 1 when possible, otherwise fallback to 1
     cpu = os.cpu_count()
     if cpu is None:
         workers = 1
     else:
-        workers = max(1, cpu // 2)
+        workers = max(1, cpu - 1)
 
     result = clean_training_csv(max_workers=workers)
     print(

@@ -69,8 +69,6 @@ def get_spark(app_name: str = "spark-pytorch-mlp") -> SparkSession:
 def load_and_preprocess(
     spark: SparkSession,
     csv_path: str,
-    use_bert: bool = False,
-    bert_model_name: str = "all-MiniLM-L6-v2",
     bert_cols: list[str] | None = None,
 ) -> pd.DataFrame:
     # Treat common textual null markers like 'NA' and empty strings as nulls
@@ -93,35 +91,11 @@ def load_and_preprocess(
     )
 
 
-    # Optional: encode text columns with a BERT encoder (sentence-transformers).
-    # By default we encode these fields when `use_bert=True`.
+    # If bert columns are not present in the merged/preprocessed data, they
+    # will be handled later. Precomputed embedding columns (e.g. "comment_emb_0")
+    # will be detected and used when building the numeric feature matrix.
     if bert_cols is None:
         bert_cols = ["comment", "title", "prod_title", "prod_features"]
-
-    bert_embeddings: dict[str, any] = {}
-    emb_dim = 0
-    if use_bert:
-        try:
-            from sentence_transformers import SentenceTransformer
-
-            model = SentenceTransformer(bert_model_name)
-            for col in bert_cols:
-                if col in df.columns:
-                    try:
-                        texts_pdf = df.select(F.col(col)).toPandas()
-                        texts = texts_pdf[col].fillna("").astype(str).tolist()
-                        emb = model.encode(texts, show_progress_bar=False, convert_to_numpy=True)
-                        bert_embeddings[col] = emb
-                        emb_dim = int(emb.shape[1]) if emb is not None else emb_dim
-                        print(f"INFO: computed BERT embeddings for '{col}' (dim={emb.shape[1]})")
-                    except Exception as ex:
-                        print(f"WARNING: failed to compute embeddings for '{col}': {ex}")
-                else:
-                    # column missing in input CSV
-                    pass
-        except Exception as ex:
-            print(f"INFO: sentence-transformers not available or failed to import: {ex}")
-            bert_embeddings = {}
 
     # Basic feature engineering: votes, purchased, time, comment length
     # Sanitize numeric input before casting to avoid failures when fields contain
@@ -149,26 +123,39 @@ def load_and_preprocess(
     )
 
     pdf = df2.toPandas()
-    # If embeddings were computed, replace the raw text values in the pandas
-    # DataFrame with the embedding arrays for each encoded column.
-    if bert_embeddings:
-        try:
-            pdf = pdf.copy()
-            for col, emb in bert_embeddings.items():
-                if emb.shape[0] == len(pdf):
-                    pdf[col] = list(emb)
-                else:
-                    print(f"WARNING: embedding count for '{col}' does not match dataframe rows; skipping replacement")
-        except Exception as ex:
-            print(f"WARNING: failed to attach embeddings to dataframe: {ex}")
+    # Note: any precomputed embedding columns with names like
+    # '<col>_emb_<i>' will be detected and included in the numeric features
+    # below; no on-the-fly BERT encoding is performed here.
     # Drop rows without label and make an explicit copy to avoid chained-assignment warnings
     pdf = pdf.dropna(subset=["rating"]).copy()
     pdf["label"] = pdf["rating"].astype(float)
-    # Build numeric feature frame for the simple case (no embeddings). When
-    # embeddings are present in the `comment` column they will be expanded by
-    # the training/prediction code to construct the full feature matrix.
-    features = pdf[["votes", "purchased", "time", "comment_len"]].astype(float)
+    # Build numeric feature frame. If embedding columns exist they will be
+    # included in the order of `bert_cols`; otherwise fall back to
+    # `comment_len`.
+    # collect embedding columns if present
+    def _collect_emb_cols(df: pd.DataFrame, bert_cols_list: list[str]) -> list[str]:
+        emb_cols: list[str] = []
+        for c in bert_cols_list:
+            prefix = f"{c}_emb_"
+            matches = [col for col in df.columns if col.startswith(prefix)]
+            if matches:
+                # sort by trailing index
+                try:
+                    matches = sorted(matches, key=lambda x: int(x.rsplit("_", 1)[1]))
+                except Exception:
+                    matches = sorted(matches)
+                emb_cols.extend(matches)
+        return emb_cols
+
+    features = pdf[["votes", "purchased", "time"]].astype(float)
     pdf_features = features.fillna(0.0)
+    emb_columns = _collect_emb_cols(pdf, bert_cols)
+    if emb_columns:
+        # ensure embedding columns are numeric and present
+        pdf_embs = pdf[emb_columns].astype(float).fillna(0.0)
+        pdf_features = pd.concat([pdf_features, pdf_embs], axis=1)
+    else:
+        pdf_features = pd.concat([pdf_features, pdf[["comment_len"]].astype(float).fillna(0.0)], axis=1)
     # If BERT embeddings were attached and the caller requested to use them
     # (handled by training/prediction code), those columns will be present in
     # `pdf` and can be used when constructing feature matrices.
@@ -212,8 +199,6 @@ def predict_csv(
     input_csv: str,
     model_path: Path = MODEL_PATH,
     report_path: Path | None = None,
-    use_bert: bool = False,
-    bert_model_name: str = "all-MiniLM-L6-v2",
     bert_cols: list[str] | None = None,
 ) -> pd.DataFrame:
     # Read input and extract features; preserve `id` if present for submission format
@@ -255,49 +240,35 @@ def predict_csv(
     pdf = df2.toPandas()
     ids = pdf.get("id")
 
-    # If requested, compute BERT embeddings for multiple prediction input columns
-    # and replace the original text values with embedding arrays so they can be
-    # expanded into numeric features below.
+    # Precomputed embedding columns (named like '<col>_emb_<i>') will be used
+    # when constructing the numeric feature matrix. No on-the-fly BERT
+    # encoding is performed during prediction.
     if bert_cols is None:
         bert_cols = ["comment", "title", "prod_title", "prod_features"]
 
-    if use_bert:
-        try:
-            from sentence_transformers import SentenceTransformer
-
-            model_st = SentenceTransformer(bert_model_name)
-            for col in bert_cols:
-                if col in df.columns:
-                    try:
-                        texts = df.select(F.col(col)).toPandas()[col].fillna("").astype(str).tolist()
-                        pred_emb = model_st.encode(texts, show_progress_bar=False, convert_to_numpy=True)
-                        if pred_emb.shape[0] == len(pdf):
-                            pdf[col] = list(pred_emb)
-                        else:
-                            print(f"WARNING: prediction embedding count for '{col}' does not match rows; skipping")
-                    except Exception as ex:
-                        print(f"WARNING: failed to compute prediction embeddings for '{col}': {ex}")
-        except Exception as ex:
-            print(f"INFO: sentence-transformers not available for prediction: {ex}")
-
-    # Expand any embedded-array columns (from bert_cols) into numeric columns
-    # in the training/prediction order: votes, purchased, time, then all
-    # embedding dims for each bert column in bert_cols order.
+    # Build feature list by including any numeric embedding columns that were
+    # precomputed during preprocessing. Embedding dims are detected by column
+    # name pattern '<col>_emb_<i>' and added in bert_cols order.
     feature_cols = ["votes", "purchased", "time"]
-    expanded = False
-    for col in (bert_cols or []):
-        if col in pdf.columns and pdf[col].dtype == object and len(pdf) > 0 and isinstance(pdf.iloc[0][col], (list, tuple, np.ndarray)):
-            first = next((v for v in pdf[col] if v is not None), None)
-            if first is not None:
-                emb_dim = int(len(first))
-                emb_cols = [f"{col}_emb_{i}" for i in range(emb_dim)]
-                emb_df = pd.DataFrame(list(pdf[col].fillna([0.0] * emb_dim)), columns=emb_cols)
-                emb_df.index = pdf.index
-                pdf = pd.concat([pdf, emb_df], axis=1)
-                feature_cols.extend(emb_cols)
-                expanded = True
+    import re
 
-    if not expanded:
+    def _collect_emb_cols(df: pd.DataFrame, bert_cols_list: list[str]) -> list[str]:
+        emb_cols: list[str] = []
+        for c in bert_cols_list:
+            prefix = f"{c}_emb_"
+            matches = [col for col in df.columns if col.startswith(prefix)]
+            if matches:
+                try:
+                    matches = sorted(matches, key=lambda x: int(x.rsplit("_", 1)[1]))
+                except Exception:
+                    matches = sorted(matches)
+                emb_cols.extend(matches)
+        return emb_cols
+
+    emb_cols = _collect_emb_cols(pdf, bert_cols)
+    if emb_cols:
+        feature_cols.extend(emb_cols)
+    else:
         feature_cols.append("comment_len")
 
     X = pdf[feature_cols].astype(float).values
@@ -371,7 +342,6 @@ def load_config(path: str | Path) -> dict:
     cfg["report_path"] = cp.get("paths", "report_path", fallback=None)
     cfg["output_csv"] = cp.get("paths", "output_csv", fallback="prediction_output/prediction_result.csv")
     # feature flags
-    cfg["use_bert"] = cp.getboolean("features", "use_bert", fallback=False)
     cfg["bert_model"] = cp.get("features", "bert_model", fallback="all-MiniLM-L6-v2")
     return cfg
 
@@ -386,8 +356,6 @@ def main():
         cfg["input_csv"],
         model_path=Path(cfg["model_path"]),
         report_path=Path(cfg["report_path"]) if cfg.get("report_path") else None,
-        use_bert=cfg.get("use_bert", False),
-        bert_model_name=cfg.get("bert_model", "all-MiniLM-L6-v2"),
     )
 
     output = cfg.get("output_csv") or "prediction_output/prediction_result.csv"
