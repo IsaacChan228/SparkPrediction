@@ -1,7 +1,9 @@
-"""Prediction helpers extracted from spark_training.
+"""Prediction helpers: Spark preprocessing, model I/O, and CSV inference.
 
-Provides Spark session helper, preprocessing, model class, and CSV
-prediction function so prediction logic is separated from training.
+This module contains utilities to create a Spark session, preprocess CSV
+inputs into numeric features compatible with the training pipeline, load the
+trained PyTorch MLP, and run batch inference producing a pandas DataFrame of
+predicted `rating` values.
 """
 from __future__ import annotations
 
@@ -24,10 +26,13 @@ MODEL_PATH = Path("Model/pytorch_mlp.pt")
 
 
 def get_spark(app_name: str = "spark-pytorch-mlp") -> SparkSession:
-    # On Windows, Spark/Hadoop may look for winutils.exe. If HADOOP_HOME is
-    # not set the log will show a FileNotFoundException about winutils.exe.
-    # Provide a clearer message and a reasonable default location to help the
-    # user fix the environment.
+    """Create and return a SparkSession, with Windows/Hadoop helpers.
+
+    On Windows Spark may require a working `winutils.exe`. The function
+    attempts to detect a sensible `C:\hadoop\bin\winutils.exe` location and
+    sets `HADOOP_HOME`/`PATH` for the current process to reduce confusing
+    startup errors. It does not modify the global environment permanently.
+    """
     if os.name == "nt":
         # If the user placed a compiled Hadoop + winutils in C:\hadoop, prefer it
         candidate = Path("C:/hadoop")
@@ -71,6 +76,15 @@ def load_and_preprocess(
     csv_path: str,
     bert_cols: list[str] | None = None,
 ) -> pd.DataFrame:
+    """Load CSV via Spark, perform robust sanitization, and return a pandas
+    DataFrame of numeric features + `label` (when present).
+
+    The function uses permissive CSV options to allow multiline quoted fields
+    and then applies column-level cleaning for `votes`, `time`, `purchased`,
+    and `comment_len`. Precomputed embedding columns (``<col>_emb_<i>``) are
+    detected later in the pandas frame and included automatically.
+    """
+
     # Treat common textual null markers like 'NA' and empty strings as nulls
     # Allow quoted fields with embedded newlines and double-quote escaping
     df = (
@@ -201,6 +215,14 @@ def predict_csv(
     report_path: Path | None = None,
     bert_cols: list[str] | None = None,
 ) -> pd.DataFrame:
+    """Run inference on `input_csv` using the trained model and return a
+    pandas DataFrame with `id` and predicted `rating`.
+
+    The function expects preprocessed numeric columns or precomputed embedding
+    columns named like ``<col>_emb_<i>`` to be present in the CSV. No on-the-
+    fly BERT encoding is performed.
+    """
+
     # Read input and extract features; preserve `id` if present for submission format
     # Treat common textual null markers like 'NA' and empty strings as nulls
     # Use same robust CSV options for prediction inputs

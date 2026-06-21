@@ -1,18 +1,12 @@
-"""Spark + PyTorch MLP training and prediction helper.
+"""Training driver: Spark preprocessing + PyTorch MLP training.
 
-This script reads cleaned training CSV via PySpark, performs light
-feature engineering, trains a small PyTorch MLP to predict the
-`rating` field (1-5). It reads cleaned training CSV via
-PySpark, performs light feature engineering, trains the model, and
-saves the trained model to `Model/pytorch_mlp.pt`.
+This module loads cleaned training data via a Spark session, performs
+light feature engineering (numeric sanitization, optional precomputed
+embeddings), and trains a small PyTorch MLP regressor for the ``rating``
+target. Trained artifacts are saved to `Model/pytorch_mlp.pt` and a
+simple training report is written to the configured report path.
 
-Prediction functionality was moved to `spark_prediction.py`. To run
-predictions use that module (it includes a CLI). Examples:
-    Train:
-        python spark_training.py --mode train
-
-    Predict:
-        python spark_prediction.py
+Prediction functionality is implemented in `spark_prediction.py`.
 """
 
 from __future__ import annotations
@@ -44,6 +38,13 @@ def train_model(
     weight_decay: float = 1e-5,
     early_stopping_patience: int = 5,
 ) -> Tuple[MLP, dict]:
+    """Train an `MLP` on the provided tabular DataFrame and return the
+    trained model and a summary dict with metrics and timing information.
+
+    The function expects `data` to already contain a numeric feature frame
+    and a `label` column. Precomputed embedding columns (e.g. "comment_emb_0")
+    will be detected and used automatically.
+    """
     print("Preparing training data...")
     # If preprocessing stored embeddings in any of the text columns (as arrays),
     # expand them into numeric feature columns. Otherwise use `comment_len`.
@@ -269,6 +270,8 @@ def load_config(path: str | Path) -> dict:
     cp = configparser.ConfigParser()
     cp.read(path)
 
+    # Read commonly tuned training parameters and paths with sensible
+    # fallbacks to allow running without a complete config file.
     cfg = {}
     cfg["epochs"] = cp.getint("training", "epochs", fallback=10)
     cfg["batch_size"] = cp.getint("training", "batch_size", fallback=64)
