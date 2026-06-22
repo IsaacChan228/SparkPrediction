@@ -38,12 +38,12 @@ ALLOWED_BERT_COLS = ["comment", "title", "prod_title", "prod_features"]
 
 def train_model(
     data: pd.DataFrame,
-    epochs: int = 100,
-    batch_size: int = 64,
-    lr: float = 1e-3,
+    epochs: int,
+    batch_size: int,
+    lr: float,
+    weight_decay: float,
+    early_stopping_patience: int,
     model_path: Path = MODEL_PATH,
-    weight_decay: float = 1e-6,
-    early_stopping_patience: int = 5,
 ) -> Tuple[MLP, dict]:
     """Train an `MLP` on the provided tabular DataFrame and return the
     trained model and a summary dict with metrics and timing information.

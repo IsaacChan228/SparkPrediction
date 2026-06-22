@@ -1,6 +1,6 @@
-Preprocessing time (s): 614.432999
-Total training time (s): 1636.155569
-Offline total time (preprocessing + training) (s): 2250.588568
+Preprocessing time (s): 600.812535
+Total training time (s): 2383.523345
+Offline total time (preprocessing + training) (s): 2984.335881
 
 Rating distribution (count, percent):
 Rating 1: 348555 (11.59%)
@@ -14,27 +14,27 @@ Mean: 3.9412
 SD: 1.4219
 
 Per-epoch timing and metrics:
-Epoch 1: time=182.673470s train_rmse=1.2007 val_rmse=1.1822
-Epoch 2: time=182.425815s train_rmse=1.1812 val_rmse=1.1778
-Epoch 3: time=182.361652s train_rmse=1.1735 val_rmse=1.1763
-Epoch 4: time=182.458527s train_rmse=1.1676 val_rmse=1.1739
-Epoch 5: time=181.025305s train_rmse=1.1621 val_rmse=1.1741
-Epoch 6: time=181.485374s train_rmse=1.1566 val_rmse=1.1749
-Epoch 7: time=181.357525s train_rmse=1.1508 val_rmse=1.1773
-Epoch 8: time=181.228941s train_rmse=1.1451 val_rmse=1.1787
-Epoch 9: time=181.123017s train_rmse=1.1315 val_rmse=1.1861
+Epoch 1: time=265.647130s train_rmse=1.2015 val_rmse=1.1888
+Epoch 2: time=265.084058s train_rmse=1.1812 val_rmse=1.1782
+Epoch 3: time=264.646846s train_rmse=1.1732 val_rmse=1.1751
+Epoch 4: time=265.187737s train_rmse=1.1665 val_rmse=1.1739
+Epoch 5: time=264.250518s train_rmse=1.1594 val_rmse=1.1748
+Epoch 6: time=264.266256s train_rmse=1.1514 val_rmse=1.1773
+Epoch 7: time=263.945914s train_rmse=1.1426 val_rmse=1.1815
+Epoch 8: time=263.916945s train_rmse=1.1332 val_rmse=1.1842
+Epoch 9: time=266.523971s train_rmse=1.1128 val_rmse=1.1925
 
 Prediction analysis:
 Predictions file: prediction_output\predictions_int.csv
 Total records: 10000
-Mean rating: 3.9491
-Std (population): 0.2809
+Mean rating: 3.9520
+Std (population): 0.2780
 
 Distribution (count, percent):
 Rating 1: 0 (0.00%)
-Rating 2: 153 (1.53%)
-Rating 3: 203 (2.03%)
-Rating 4: 9644 (96.44%)
+Rating 2: 158 (1.58%)
+Rating 3: 164 (1.64%)
+Rating 4: 9678 (96.78%)
 Rating 5: 0 (0.00%)
 
-Inference: 10000 records, total_time_s=0.087604, avg_time_s=0.000009
+Inference: 10000 records, total_time_s=0.094250, avg_time_s=0.000009

@@ -325,7 +325,7 @@ class MLP(nn.Module):
     Defaults tuned for larger capacity to address underfitting. Uses
     LayerNorm + SiLU activation and dropout between layers.
     """
-    def __init__(self, input_dim: int, hidden: tuple = (2048, 1024, 512, 256, 128, 64), out: int = 1, dropout: float = 0.1, use_layernorm: bool = True):
+    def __init__(self, input_dim: int, hidden: tuple = (4096, 2048, 2048, 1024, 512, 256, 128, 64), out: int = 1, dropout: float = 0.1, use_layernorm: bool = True):
         super().__init__()
         layers: list[nn.Module] = []
         prev = input_dim
