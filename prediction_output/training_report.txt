@@ -1,0 +1,29 @@
+Preprocessing time (s): 620.254216
+Total training time (s): 1112.073580
+Offline total time (preprocessing + training) (s): 1732.327796
+
+Rating distribution (count, percent):
+Rating 1: 348555 (11.59%)
+Rating 2: 248325 (8.26%)
+Rating 3: 297613 (9.90%)
+Rating 4: 449858 (14.96%)
+Rating 5: 1663088 (55.30%)
+
+Rating statistics:
+Mean: 3.9412
+SD: 1.4219
+
+Per-epoch timing and metrics:
+Epoch 1: time=111.846072s train_rmse=1.2369 val_rmse=1.1929
+Epoch 2: time=111.466255s train_rmse=1.2091 val_rmse=1.1879
+Epoch 3: time=111.401666s train_rmse=1.2062 val_rmse=1.1873
+Epoch 4: time=110.857379s train_rmse=1.2045 val_rmse=1.1853
+Epoch 5: time=111.205836s train_rmse=1.2032 val_rmse=1.1846
+Epoch 6: time=111.092323s train_rmse=1.2024 val_rmse=1.1837
+Epoch 7: time=111.128676s train_rmse=1.2019 val_rmse=1.1829
+Epoch 8: time=110.944635s train_rmse=1.2009 val_rmse=1.1856
+Epoch 9: time=111.023011s train_rmse=1.2005 val_rmse=1.1822
+Epoch 10: time=111.098571s train_rmse=1.2004 val_rmse=1.1817
+
+
+Inference: 10000 records, total_time_s=0.094215, avg_time_s=0.000009

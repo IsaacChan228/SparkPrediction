@@ -20,6 +20,109 @@ import torch.nn as nn
 from torch.utils.data import Dataset
 from pyspark.sql import SparkSession
 import pyspark.sql.functions as F
+import tempfile
+import shutil
+
+# Optional diagnostics helper: use psutil when available to inspect process memory
+try:
+    import psutil
+    _PSUTIL_AVAILABLE = True
+except Exception:
+    psutil = None
+    _PSUTIL_AVAILABLE = False
+
+
+def log_memory_snapshot(tag: str = "") -> dict:
+    """Log a short memory snapshot for the Python process and any Java processes.
+
+    Returns a dict with basic diagnostics.
+    """
+    info = {"tag": tag, "python_pid": os.getpid(), "timestamp": time.time()}
+    try:
+        if _PSUTIL_AVAILABLE:
+            p = psutil.Process(os.getpid())
+            info["python_rss_bytes"] = p.memory_info().rss
+            # collect java processes (likely the Spark JVM)
+            java_procs = []
+            for proc in psutil.process_iter(["pid", "name", "cmdline", "memory_info"]):
+                try:
+                    name = (proc.info.get("name") or "").lower()
+                    cmd = " ".join(proc.info.get("cmdline") or [])
+                    if "java" in name or "java" in cmd:
+                        mi = proc.info.get("memory_info")
+                        rss = mi.rss if mi is not None else None
+                        java_procs.append({"pid": proc.info.get("pid"), "name": name, "cmdline": cmd, "rss": rss})
+                except Exception:
+                    continue
+            # sort by rss desc
+            java_procs = sorted(java_procs, key=lambda x: x.get("rss") or 0, reverse=True)
+            info["java_processes"] = java_procs[:5]
+        else:
+            info["warning"] = "psutil not available; install psutil for richer diagnostics"
+    except Exception as e:
+        info["error"] = str(e)
+
+    # print concise diagnostics to stdout for quick debugging
+    try:
+        print(f"[MEMORY] {tag}: python_pid={info.get('python_pid')} python_rss={info.get('python_rss_bytes', 'n/a')}")
+        if info.get("java_processes"):
+            for jp in info["java_processes"]:
+                print(f"[MEMORY] {tag}: java pid={jp.get('pid')} rss={jp.get('rss')} cmd={jp.get('cmdline')[:200]}")
+        elif info.get("warning"):
+            print(f"[MEMORY] {tag}: {info.get('warning')}")
+    except Exception:
+        pass
+
+    return info
+
+
+def log_java_xmx(tag: str = "") -> dict:
+    """Detect java processes and print their -Xmx settings when available."""
+    info = {"tag": tag, "timestamp": time.time(), "java_xmx": []}
+    if not _PSUTIL_AVAILABLE:
+        print(f"[JAVA-XMX] {tag}: psutil not available; cannot inspect java cmdline")
+        return info
+
+    import shlex
+    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+        try:
+            name = (proc.info.get("name") or "").lower()
+            cmdline_list = proc.info.get("cmdline") or []
+            cmd = " ".join(cmdline_list)
+            if "java" not in name and "java" not in cmd:
+                continue
+            # look for -Xmx value in the joined commandline
+            m = re.search(r"-Xmx(\d+)([kKmMgG]?)", cmd)
+            xmx_raw = m.group(0) if m else None
+            xmx_bytes = None
+            if m:
+                val = int(m.group(1))
+                unit = m.group(2).lower()
+                if unit == "g":
+                    xmx_bytes = val * 1024 ** 3
+                elif unit == "m":
+                    xmx_bytes = val * 1024 ** 2
+                elif unit == "k":
+                    xmx_bytes = val * 1024
+                else:
+                    xmx_bytes = val
+            info["java_xmx"].append({"pid": proc.info.get("pid"), "cmd": cmd[:200], "xmx_raw": xmx_raw, "xmx_bytes": xmx_bytes})
+        except Exception:
+            continue
+
+    # print concise summary
+    if info["java_xmx"]:
+        for j in info["java_xmx"]:
+            xb = j.get("xmx_bytes")
+            if xb:
+                gb = xb / (1024 ** 3)
+                print(f"[JAVA-XMX] {tag}: pid={j.get('pid')} {j.get('xmx_raw')} (~{gb:.1f}g)")
+            else:
+                print(f"[JAVA-XMX] {tag}: pid={j.get('pid')} xmx not found in cmd: {j.get('cmd')[:200]}")
+    else:
+        print(f"[JAVA-XMX] {tag}: no java processes found")
+
+    return info
 
 
 MODEL_PATH = Path("Model/pytorch_mlp.pt")
@@ -34,6 +137,7 @@ def get_spark(app_name: str = "spark-pytorch-mlp") -> SparkSession:
     Uses sensible defaults for driver memory and shuffle partitions which can
     be tuned via environment variables to avoid Java heap OOM on large runs.
     """
+    
     if os.name == "nt":
         candidate = Path("C:/hadoop")
         candidate_winutils = candidate / "bin" / "winutils.exe"
@@ -46,20 +150,70 @@ def get_spark(app_name: str = "spark-pytorch-mlp") -> SparkSession:
                 print(f"INFO: detected winutils.exe at {candidate_winutils}; set HADOOP_HOME={candidate} and added {binpath} to PATH")
 
     # Tuned defaults for a 16-core / 32GB machine; can be overridden via env
-    driver_mem = os.environ.get("SPARK_DRIVER_MEMORY", "16g")
-    shuffle_parts = os.environ.get("SPARK_SQL_SHUFFLE_PARTITIONS", "32")
+    driver_mem = os.environ.get("SPARK_DRIVER_MEMORY", "30g")
+    # executor memory defaults to driver memory when not set explicitly
+    exec_mem = os.environ.get("SPARK_EXECUTOR_MEMORY", driver_mem)
+    shuffle_parts = os.environ.get("SPARK_SQL_SHUFFLE_PARTITIONS", "16")
     max_result = os.environ.get("SPARK_DRIVER_MAX_RESULT_SIZE", "8g")
 
     builder = (
         SparkSession.builder.appName(app_name)
         .master(os.environ.get("SPARK_MASTER", "local[12]"))
         .config("spark.driver.memory", driver_mem)
+        .config("spark.executor.memory", exec_mem)
         .config("spark.driver.maxResultSize", max_result)
         .config("spark.sql.shuffle.partitions", shuffle_parts)
         .config("spark.sql.debug.maxToStringFields", os.environ.get("SPARK_SQL_DEBUG_MAX_FIELDS", "1000"))
     )
 
-    return builder.getOrCreate()
+    spark = builder.getOrCreate()
+    # snapshot memory after Spark session is created
+    try:
+        log_memory_snapshot("post_get_spark")
+    except Exception:
+        pass
+    try:
+        log_java_xmx("post_get_spark")
+    except Exception:
+        pass
+    try:
+        configured = spark.conf.get("spark.driver.memory")
+    except Exception:
+        # fallback to SparkContext conf
+        try:
+            configured = spark.sparkContext.getConf().get("spark.driver.memory")
+        except Exception:
+            configured = os.environ.get("SPARK_DRIVER_MEMORY", "unknown")
+    # Also print other relevant Spark memory settings to help diagnose JVM OOMs
+    try:
+        exec_mem = spark.conf.get("spark.executor.memory")
+    except Exception:
+        try:
+            exec_mem = spark.sparkContext.getConf().get("spark.executor.memory")
+        except Exception:
+            exec_mem = os.environ.get("SPARK_EXECUTOR_MEMORY", "unset")
+
+    try:
+        max_res = spark.conf.get("spark.driver.maxResultSize")
+    except Exception:
+        try:
+            max_res = spark.sparkContext.getConf().get("spark.driver.maxResultSize")
+        except Exception:
+            max_res = os.environ.get("SPARK_DRIVER_MAX_RESULT_SIZE", "unset")
+
+    try:
+        shuffle_parts = spark.conf.get("spark.sql.shuffle.partitions")
+    except Exception:
+        try:
+            shuffle_parts = spark.sparkContext.getConf().get("spark.sql.shuffle.partitions")
+        except Exception:
+            shuffle_parts = os.environ.get("SPARK_SQL_SHUFFLE_PARTITIONS", "unset")
+
+    print(f"Configured Spark driver memory: {configured}")
+    print(f"Configured Spark executor memory: {exec_mem}")
+    print(f"Configured spark.driver.maxResultSize: {max_res}")
+    print(f"Configured spark.sql.shuffle.partitions: {shuffle_parts}")
+    return spark
 
 
 def load_and_preprocess(
@@ -116,16 +270,28 @@ def load_and_preprocess(
     emb_cols = [c for c in df.columns if re.search(r"_emb_\d+$", c)]
     prod_cols = [c for c in ("prod_price", "prod_rating_number", "prod_main_category", "prod_store") if c in df.columns]
 
-    batch_size = int(os.environ.get("SPARK_TO_PANDAS_BATCH_SIZE", "5000"))
+    batch_size = int(os.environ.get("SPARK_TO_PANDAS_BATCH_SIZE", "1000"))
     sel_cols = list(df2.columns) + emb_cols + prod_cols
 
-    parts: list[pd.DataFrame] = []
     buffer: list[dict] = []
     it = df.select(*sel_cols).toLocalIterator()
+    # prepare temporary file to stream processed batches to disk
+    tmpdir = tempfile.mkdtemp(prefix="spark_parts_")
+    merged_path = os.path.join(tmpdir, "merged_parts.csv")
+    first_write = True
+    # diagnostic snapshot before iterating rows from the JVM
     for row in it:
         buffer.append(row.asDict())
         if len(buffer) >= batch_size:
-            part = pd.DataFrame(buffer)
+            try:
+                print(f"Processing batch: buffered_rows={len(buffer)}")
+                part = pd.DataFrame(buffer)
+            except Exception:
+                try:
+                    log_memory_snapshot("error_creating_part")
+                except Exception:
+                    pass
+                raise
             # coerce types for embeddings and product cols
             for c in emb_cols:
                 if c in part.columns:
@@ -138,8 +304,21 @@ def load_and_preprocess(
                 part["prod_main_category"] = pd.Categorical(part["prod_main_category"].fillna("")).codes.astype(float)
             if "prod_store" in part.columns:
                 part["prod_store"] = pd.Categorical(part["prod_store"].fillna("")).codes.astype(float)
-            parts.append(part)
+
+            # append processed part to merged CSV on disk to avoid accumulating in memory
+            try:
+                part.to_csv(merged_path, mode="a", header=first_write, index=False)
+                first_write = False
+            except Exception:
+                try:
+                    log_memory_snapshot("error_writing_part_to_disk")
+                except Exception:
+                    pass
+                raise
+
+            # clear buffer and free part
             buffer = []
+            del part
 
     if buffer:
         part = pd.DataFrame(buffer)
@@ -154,12 +333,31 @@ def load_and_preprocess(
             part["prod_main_category"] = pd.Categorical(part["prod_main_category"].fillna("")).codes.astype(float)
         if "prod_store" in part.columns:
             part["prod_store"] = pd.Categorical(part["prod_store"].fillna("")).codes.astype(float)
-        parts.append(part)
+        try:
+            part.to_csv(merged_path, mode="a", header=first_write, index=False)
+            first_write = False
+        except Exception:
+            try:
+                log_memory_snapshot("error_writing_last_part_to_disk")
+            except Exception:
+                pass
+            raise
+        del part
 
-    if parts:
-        pdf = pd.concat(parts, ignore_index=True)
-    else:
-        pdf = pd.DataFrame(columns=sel_cols)
+    # If we wrote a merged CSV to disk, read it back efficiently with explicit dtypes
+    try:
+        if os.path.exists(merged_path) and os.path.getsize(merged_path) > 0:
+            # build dtype map for numeric columns to use float32
+            dtype_map = {c: "float32" for c in sel_cols}
+            pdf = pd.read_csv(merged_path, dtype=dtype_map)
+        else:
+            pdf = pd.DataFrame(columns=sel_cols)
+    finally:
+        # cleanup temporary directory
+        try:
+            shutil.rmtree(tmpdir)
+        except Exception:
+            pass
 
     # validate rating presence
     if "rating" not in pdf.columns:
@@ -285,17 +483,30 @@ def predict_csv(
     prod_cols = [c for c in ("prod_main_category", "prod_price", "prod_store", "prod_rating_number") if c in df.columns]
     if emb_cols or prod_cols:
         small = df.select(*(emb_cols + prod_cols)).toPandas()
+        # Build new columns in a separate DataFrame then concat once to avoid
+        # fragmenting `pdf` by repeated assignments (PerformanceWarning).
+        small = small.reset_index(drop=True)
+        pdf = pdf.reset_index(drop=True)
+        add_cols: dict = {}
         for c in emb_cols:
             if c in small.columns:
-                pdf[c] = pd.to_numeric(small[c], errors="coerce").fillna(0.0)
+                add_cols[c] = pd.to_numeric(small[c], errors="coerce").fillna(0.0)
         if "prod_price" in small.columns:
-            pdf["prod_price"] = pd.to_numeric(small["prod_price"].astype(str).str.replace(r"[^0-9.\\-]", "", regex=True), errors="coerce").fillna(0.0)
+            add_cols["prod_price"] = pd.to_numeric(small["prod_price"].astype(str).str.replace(r"[^0-9.\\-]", "", regex=True), errors="coerce").fillna(0.0)
         if "prod_rating_number" in small.columns:
-            pdf["prod_rating_number"] = pd.to_numeric(small["prod_rating_number"].astype(str).str.replace(r"[^0-9.\\-]", "", regex=True), errors="coerce").fillna(0.0)
+            add_cols["prod_rating_number"] = pd.to_numeric(small["prod_rating_number"].astype(str).str.replace(r"[^0-9.\\-]", "", regex=True), errors="coerce").fillna(0.0)
         if "prod_main_category" in small.columns:
-            pdf["prod_main_category"] = pd.Categorical(small["prod_main_category"].fillna("")).codes.astype(float)
+            add_cols["prod_main_category"] = pd.Categorical(small["prod_main_category"].fillna("")).codes.astype(float)
         if "prod_store" in small.columns:
-            pdf["prod_store"] = pd.Categorical(small["prod_store"].fillna("")).codes.astype(float)
+            add_cols["prod_store"] = pd.Categorical(small["prod_store"].fillna("")).codes.astype(float)
+        if add_cols:
+            add_df = pd.DataFrame(add_cols)
+            pdf = pd.concat([pdf, add_df], axis=1)
+        # Defragment the DataFrame for better performance
+        try:
+            pdf = pdf.copy()
+        except Exception:
+            pass
 
     if bert_cols is None:
         bert_cols = ALLOWED_BERT_COLS
@@ -368,11 +579,48 @@ def predict_csv(
 
     if report_path is not None:
         rp = Path(report_path)
-        if rp.exists():
-            try:
-                with rp.open("a", encoding="utf-8") as fh:
-                    fh.write(f"\nInference: {len(ratings)} records, total_time_s={total:.6f}, avg_time_s={avg:.6f}\n")
-            except Exception:
-                pass
+        try:
+            rp.parent.mkdir(parents=True, exist_ok=True)
+            # If the report exists, remove any existing Inference lines so
+            # there's always only a single inference-time row.
+            if rp.exists():
+                try:
+                    text = rp.read_text(encoding="utf-8")
+                    lines = text.splitlines()
+                    filtered = [ln for ln in lines if not ln.strip().startswith("Inference:")]
+                except Exception:
+                    filtered = []
+            else:
+                filtered = []
+
+            filtered.append(f"Inference: {len(ratings)} records, total_time_s={total:.6f}, avg_time_s={avg:.6f}")
+            rp.write_text("\n".join(filtered) + "\n", encoding="utf-8")
+        except Exception:
+            pass
 
     return out
+
+
+def main():
+    import os
+    cp = configparser.ConfigParser()
+    cp.read("config.cfg")
+
+    input_csv = cp.get("paths", "input_csv", fallback="prediction_input/test_merged.csv")
+    model_path = Path(cp.get("paths", "model_path", fallback=str(MODEL_PATH)))
+    report_path = cp.get("paths", "report_path", fallback=None)
+
+    spark = get_spark()
+    print("Spark session started")
+
+    print(f"Running prediction on: {input_csv}")
+    out = predict_csv(spark, input_csv, model_path=Path(model_path), report_path=report_path)
+
+    out_path = Path("prediction_output/predictions.csv")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out.to_csv(out_path, index=False)
+    print(f"Wrote predictions to {out_path}")
+
+
+if __name__ == "__main__":
+    main()

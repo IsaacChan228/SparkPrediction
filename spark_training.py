@@ -21,7 +21,14 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from spark_prediction import MODEL_PATH, get_spark, load_and_preprocess, TabularDataset, MLP
+from spark_prediction import (
+    MODEL_PATH,
+    get_spark,
+    load_and_preprocess,
+    TabularDataset,
+    MLP,
+    log_memory_snapshot,
+)
 
 # Enforce these text columns must be represented by embeddings
 ALLOWED_BERT_COLS = ["comment", "title", "prod_title", "prod_features"]
@@ -294,13 +301,125 @@ def load_config(path: str | Path) -> dict:
     return cfg
 
 
+def _parse_mem_string(mem: str) -> int:
+    """Parse human-friendly memory strings like '16g' or '512m' into bytes."""
+    if not mem:
+        return 0
+    mem = str(mem).strip().lower()
+    try:
+        if mem.endswith("g"):
+            return int(float(mem[:-1]) * 1024 ** 3)
+        if mem.endswith("m"):
+            return int(float(mem[:-1]) * 1024 ** 2)
+        if mem.endswith("k"):
+            return int(float(mem[:-1]) * 1024)
+        return int(mem)
+    except Exception:
+        return 0
+
+
+def estimate_required_driver_memory(csv_path: str | Path, sample_lines: int = 1000, expand_factor: float = 6.0) -> dict:
+    """Estimate a recommended Spark driver heap (human-readable) based on CSV size.
+
+    Heuristic: sample a number of rows to compute average bytes/row, estimate rows,
+    multiply by an expansion factor (parsing + pandas/numpy in-memory) and the
+    configured batch size used when streaming rows to pandas. Returns a dict
+    containing `recommended` (e.g. '32g') and diagnostic fields.
+    """
+    import os
+    try:
+        csv_path = str(csv_path)
+        file_size = os.path.getsize(csv_path)
+        avg_line = None
+        with open(csv_path, "rb") as fh:
+            # skip header
+            fh.readline()
+            lengths = []
+            for i in range(sample_lines):
+                line = fh.readline()
+                if not line:
+                    break
+                lengths.append(len(line))
+        if lengths:
+            avg_line = float(sum(lengths)) / len(lengths)
+        else:
+            # fallback to average considering whole file size and 1 line minimal
+            avg_line = max(1.0, float(file_size))
+
+        est_rows = int(file_size / max(1.0, avg_line))
+        batch_size = int(os.environ.get("SPARK_TO_PANDAS_BATCH_SIZE", "500"))
+
+        per_row_mem = avg_line * float(expand_factor)
+        rows_in_batch = min(batch_size, max(1, est_rows))
+        batch_mem = per_row_mem * rows_in_batch
+
+        # Add headroom for pandas, Python and the JVM: 2GB base + 20% buffer
+        total_required = batch_mem * 1.2 + (2 * 1024 ** 3)
+
+        # Round to sensible GB multiples (min 4GB, round up to multiple of 4GB)
+        gb = 1024 ** 3
+        req_gb = int((total_required + gb - 1) // gb)
+        if req_gb < 4:
+            req_gb = 4
+        elif req_gb % 4 != 0:
+            req_gb = ((req_gb // 4) + 1) * 4
+
+        recommended = f"{req_gb}g"
+        return {
+            "recommended": recommended,
+            "estimated_rows": est_rows,
+            "avg_line_bytes": avg_line,
+            "batch_size": batch_size,
+            "batch_mem_bytes": int(batch_mem),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 def main():
+    import os
+
+    # Load config early so we can estimate required driver heap for the input CSV
+    cfg = load_config("config.cfg")
+    train_csv = cfg.get("train_csv")
+
+    # Estimate required driver memory based on CSV size and batch settings
+    try:
+        est = estimate_required_driver_memory(train_csv)
+        if "recommended" in est:
+            print(
+                f"Estimated required Spark driver memory: {est['recommended']} "
+                f"(batch_size={est['batch_size']}, estimated_rows={est['estimated_rows']}, avg_line_bytes={est['avg_line_bytes']:.1f})"
+            )
+            existing = os.environ.get("SPARK_DRIVER_MEMORY")
+            existing_bytes = _parse_mem_string(existing) if existing else 0
+            rec_bytes = _parse_mem_string(est["recommended"])
+            if rec_bytes > existing_bytes:
+                print(f"Current SPARK_DRIVER_MEMORY={existing or 'unset'}; recommended={est['recommended']}")
+                if os.environ.get("AUTO_SET_SPARK_DRIVER_MEMORY", "0") == "1":
+                    os.environ["SPARK_DRIVER_MEMORY"] = est["recommended"]
+                    # also set executor memory to the same recommended value
+                    os.environ["SPARK_EXECUTOR_MEMORY"] = est["recommended"]
+                    # set driver max result size to half of recommended driver memory (but at least 1g)
+                    try:
+                        rec_b = _parse_mem_string(est["recommended"])
+                        half_b = max(1024 ** 3, rec_b // 2)
+                        gb = 1024 ** 3
+                        half_g = int((half_b + gb - 1) // gb)
+                        os.environ["SPARK_DRIVER_MAX_RESULT_SIZE"] = f"{half_g}g"
+                    except Exception:
+                        pass
+                    print("AUTO_SET_SPARK_DRIVER_MEMORY=1 -> SPARK_DRIVER_MEMORY, SPARK_EXECUTOR_MEMORY, and SPARK_DRIVER_MAX_RESULT_SIZE set to recommended values")
+                else:
+                    print("Tip: set SPARK_DRIVER_MEMORY to the recommended value to avoid Java heap OOMs.")
+        else:
+            print(f"Could not estimate required driver memory: {est.get('error')}")
+    except Exception as e:
+        print(f"Failed to compute memory estimate: {e}")
+
     spark = get_spark()
     print("Spark session started")
 
-    cfg = load_config("config.cfg")
-
-    train_csv = cfg.get("train_csv")
     model_path = Path(cfg.get("model_path"))
 
     epochs = cfg.get("epochs")
@@ -312,7 +431,22 @@ def main():
     # measure preprocessing time
     print(f"Preprocessing input CSV: {train_csv}")
     pre_start = time.perf_counter()
-    df = load_and_preprocess(spark, train_csv)
+    try:
+        try:
+            log_memory_snapshot("before_load_and_preprocess")
+        except Exception:
+            pass
+        df = load_and_preprocess(spark, train_csv)
+        try:
+            log_memory_snapshot("after_load_and_preprocess")
+        except Exception:
+            pass
+    except Exception:
+        try:
+            log_memory_snapshot("load_and_preprocess_failed")
+        except Exception:
+            pass
+        raise
     # Reduce dataframe to only feature + label columns to minimize driver memory
     # Detect embedding columns and product feature cols, mirror train_model logic
     bert_cols = ALLOWED_BERT_COLS
