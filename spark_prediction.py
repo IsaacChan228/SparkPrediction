@@ -62,16 +62,7 @@ def log_memory_snapshot(tag: str = "") -> dict:
     except Exception as e:
         info["error"] = str(e)
 
-    # print concise diagnostics to stdout for quick debugging
-    try:
-        print(f"[MEMORY] {tag}: python_pid={info.get('python_pid')} python_rss={info.get('python_rss_bytes', 'n/a')}")
-        if info.get("java_processes"):
-            for jp in info["java_processes"]:
-                print(f"[MEMORY] {tag}: java pid={jp.get('pid')} rss={jp.get('rss')} cmd={jp.get('cmdline')[:200]}")
-        elif info.get("warning"):
-            print(f"[MEMORY] {tag}: {info.get('warning')}")
-    except Exception:
-        pass
+    # diagnostics collected in `info`; printing disabled to silence output
 
     return info
 
@@ -110,17 +101,7 @@ def log_java_xmx(tag: str = "") -> dict:
         except Exception:
             continue
 
-    # print concise summary
-    if info["java_xmx"]:
-        for j in info["java_xmx"]:
-            xb = j.get("xmx_bytes")
-            if xb:
-                gb = xb / (1024 ** 3)
-                print(f"[JAVA-XMX] {tag}: pid={j.get('pid')} {j.get('xmx_raw')} (~{gb:.1f}g)")
-            else:
-                print(f"[JAVA-XMX] {tag}: pid={j.get('pid')} xmx not found in cmd: {j.get('cmd')[:200]}")
-    else:
-        print(f"[JAVA-XMX] {tag}: no java processes found")
+    # summary stored in `info`; printing disabled to avoid noisy stdout
 
     return info
 
@@ -414,7 +395,7 @@ class TabularDataset(Dataset):
 
 
 class MLP(nn.Module):
-    def __init__(self, input_dim: int, hidden1: int = 128, hidden2: int = 64, out: int = 1, dropout: float = 0.2):
+    def __init__(self, input_dim: int, hidden1: int = 128, hidden2: int = 64, hidden3: int = 32, hidden4: int = 16, out: int = 1, dropout: float = 0.2):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(input_dim, hidden1),
@@ -425,7 +406,15 @@ class MLP(nn.Module):
             nn.BatchNorm1d(hidden2),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden2, out),
+            nn.Linear(hidden2, hidden3),
+            nn.BatchNorm1d(hidden3),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden3, hidden4),
+            nn.BatchNorm1d(hidden4),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden4, out),
         )
 
     def forward(self, x):
@@ -565,16 +554,16 @@ def predict_csv(
         elapsed = time.perf_counter() - start
         preds = np.clip(preds, 1.0, 5.0)
 
-    ratings = np.rint(preds).astype(int)
-    ratings = np.clip(ratings, 1, 5)
+    # Keep predicted ratings as floats for better loss calculation downstream
+    preds_float = preds.astype(float)
 
     if ids is not None:
-        out = pd.DataFrame({"id": ids.astype(int), "rating": ratings})
+        out = pd.DataFrame({"id": ids.astype(int), "rating": preds_float})
     else:
-        out = pd.DataFrame({"id": np.arange(len(ratings)), "rating": ratings})
+        out = pd.DataFrame({"id": np.arange(len(preds_float)), "rating": preds_float})
 
     total = float(elapsed)
-    avg = total / max(1, len(ratings))
+    avg = total / max(1, len(preds_float))
     print(f"Inference total time: {total:.6f}s, average per record: {avg:.6f}s")
 
     if report_path is not None:
@@ -593,7 +582,7 @@ def predict_csv(
             else:
                 filtered = []
 
-            filtered.append(f"Inference: {len(ratings)} records, total_time_s={total:.6f}, avg_time_s={avg:.6f}")
+            filtered.append(f"Inference: {len(preds_float)} records, total_time_s={total:.6f}, avg_time_s={avg:.6f}")
             rp.write_text("\n".join(filtered) + "\n", encoding="utf-8")
         except Exception:
             pass
@@ -616,10 +605,28 @@ def main():
     print(f"Running prediction on: {input_csv}")
     out = predict_csv(spark, input_csv, model_path=Path(model_path), report_path=report_path)
 
-    out_path = Path("prediction_output/predictions.csv")
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out.to_csv(out_path, index=False)
-    print(f"Wrote predictions to {out_path}")
+    out_dir = Path("prediction_output")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    float_path = out_dir / "predictions_float.csv"
+    rounded_path = out_dir / "predictions_int.csv"
+
+    # write float predictions
+    out.to_csv(float_path, index=False)
+
+    # create rounded, capped integer predictions
+    try:
+        rounded = out.copy()
+        rounded["rating"] = np.rint(rounded["rating"].astype(float)).astype(int)
+        rounded["rating"] = np.clip(rounded["rating"], 1, 5)
+        rounded.to_csv(rounded_path, index=False)
+    except Exception:
+        # fallback: still write float file if rounding fails
+        rounded_path = None
+
+    print(f"Wrote float predictions to {float_path}")
+    if rounded_path:
+        print(f"Wrote rounded predictions to {rounded_path}")
 
 
 if __name__ == "__main__":
