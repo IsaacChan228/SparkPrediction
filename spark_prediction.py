@@ -22,6 +22,7 @@ import time
 
 import numpy as np
 import pandas as pd
+import sys
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset
@@ -172,6 +173,8 @@ def load_and_preprocess(
 
     buffer: list[dict] = []
     it = df.select(*sel_cols).toLocalIterator()
+    _progress_prev_len = 0
+    _progress_is_tty = sys.stdout.isatty()
     # prepare temporary file to stream processed batches to disk
     tmpdir = tempfile.mkdtemp(prefix="spark_parts_")
     merged_path = os.path.join(tmpdir, "merged_parts.csv")
@@ -181,10 +184,15 @@ def load_and_preprocess(
         buffer.append(row.asDict())
         if len(buffer) >= batch_size:
             try:
-                try:
-                    print(f"\rProcessing batch: buffered_rows={len(buffer)}", end="", flush=True)
-                except Exception:
-                    # fallback to plain print if terminal doesn't support carriage returns
+                # Print progress in a tty-aware way: overwrite same line when possible,
+                # otherwise emit a normal line to keep logs readable.
+                if _progress_is_tty:
+                    msg = f"Processing batch: buffered_rows={len(buffer)}"
+                    # write carriage return + message and pad to clear remainder
+                    sys.stdout.write("\r" + msg + " " * max(0, _progress_prev_len - len(msg)))
+                    sys.stdout.flush()
+                    _progress_prev_len = len(msg)
+                else:
                     print(f"Processing batch: buffered_rows={len(buffer)}")
                 part = pd.DataFrame(buffer)
             except Exception:
@@ -317,7 +325,7 @@ class MLP(nn.Module):
     Defaults tuned for larger capacity to address underfitting. Uses
     LayerNorm + SiLU activation and dropout between layers.
     """
-    def __init__(self, input_dim: int, hidden: tuple = (1024, 512, 256, 128, 64), out: int = 1, dropout: float = 0.1, use_layernorm: bool = True):
+    def __init__(self, input_dim: int, hidden: tuple = (2048, 1024, 512, 256, 128, 64), out: int = 1, dropout: float = 0.1, use_layernorm: bool = True):
         super().__init__()
         layers: list[nn.Module] = []
         prev = input_dim

@@ -1,6 +1,6 @@
-Preprocessing time (s): 605.956049
-Total training time (s): 1646.094319
-Offline total time (preprocessing + training) (s): 2252.050369
+Preprocessing time (s): 614.432999
+Total training time (s): 1636.155569
+Offline total time (preprocessing + training) (s): 2250.588568
 
 Rating distribution (count, percent):
 Rating 1: 348555 (11.59%)
@@ -14,28 +14,27 @@ Mean: 3.9412
 SD: 1.4219
 
 Per-epoch timing and metrics:
-Epoch 1: time=164.748699s train_rmse=1.1990 val_rmse=1.1839
-Epoch 2: time=163.613171s train_rmse=1.1810 val_rmse=1.1789
-Epoch 3: time=164.317343s train_rmse=1.1739 val_rmse=1.1770
-Epoch 4: time=164.414616s train_rmse=1.1690 val_rmse=1.1756
-Epoch 5: time=164.266307s train_rmse=1.1649 val_rmse=1.1756
-Epoch 6: time=164.912971s train_rmse=1.1608 val_rmse=1.1763
-Epoch 7: time=165.006018s train_rmse=1.1569 val_rmse=1.1784
-Epoch 8: time=165.236174s train_rmse=1.1533 val_rmse=1.1780
-Epoch 9: time=164.966401s train_rmse=1.1441 val_rmse=1.1790
-Epoch 10: time=164.602107s train_rmse=1.1400 val_rmse=1.1809
+Epoch 1: time=182.673470s train_rmse=1.2007 val_rmse=1.1822
+Epoch 2: time=182.425815s train_rmse=1.1812 val_rmse=1.1778
+Epoch 3: time=182.361652s train_rmse=1.1735 val_rmse=1.1763
+Epoch 4: time=182.458527s train_rmse=1.1676 val_rmse=1.1739
+Epoch 5: time=181.025305s train_rmse=1.1621 val_rmse=1.1741
+Epoch 6: time=181.485374s train_rmse=1.1566 val_rmse=1.1749
+Epoch 7: time=181.357525s train_rmse=1.1508 val_rmse=1.1773
+Epoch 8: time=181.228941s train_rmse=1.1451 val_rmse=1.1787
+Epoch 9: time=181.123017s train_rmse=1.1315 val_rmse=1.1861
 
 Prediction analysis:
 Predictions file: prediction_output\predictions_int.csv
 Total records: 10000
-Mean rating: 4.6471
-Std (population): 0.5966
+Mean rating: 3.9491
+Std (population): 0.2809
 
 Distribution (count, percent):
 Rating 1: 0 (0.00%)
-Rating 2: 159 (1.59%)
-Rating 3: 161 (1.61%)
-Rating 4: 2730 (27.30%)
-Rating 5: 6950 (69.50%)
+Rating 2: 153 (1.53%)
+Rating 3: 203 (2.03%)
+Rating 4: 9644 (96.44%)
+Rating 5: 0 (0.00%)
 
-Inference: 10000 records, total_time_s=0.091975, avg_time_s=0.000009
+Inference: 10000 records, total_time_s=0.087604, avg_time_s=0.000009
