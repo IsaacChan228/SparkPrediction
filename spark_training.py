@@ -10,8 +10,6 @@ Features:
 - Trained artifacts saved to `Model/pytorch_mlp.pt` and a simple training
     report written to the configured report path.
 
-This driver does not perform psutil-based runtime diagnostics; use the
-estimator and Spark config prints for tuning.
 """
 
 from __future__ import annotations
@@ -57,7 +55,8 @@ def train_model(
     print("Preparing training data...")
     # Only accept precomputed numeric embedding columns named '<col>_emb_<i>'
     bert_cols = ALLOWED_BERT_COLS
-        # propagate exception; no runtime diagnostic capture here
+    # Base numeric feature columns expected for training
+    feature_cols = ["votes", "purchased", "time"]
 
     # Detect numeric embedding columns stored in the dataframe
     emb_cols_detected: list[str] = []
@@ -85,10 +84,6 @@ def train_model(
     X = data[feature_cols].astype(np.float32).values
     y = data["label"].astype(np.float32).values
 
-    # No runtime diagnostic printouts; use the
-    # `estimate_required_driver_memory()` helper and SPARK_* env vars to tune
-    # JVM heap sizes when necessary.
-
     # 80/20 train/validation split
     n = len(y)
     if n == 0:
@@ -104,8 +99,6 @@ def train_model(
     X_val, y_val = X[val_idx], y[val_idx]
 
     print(f"Total samples: {n}, train: {len(train_idx)}, val: {len(val_idx)}")
-
-    # Feature diagnostics and linear baseline removed to quiet output
 
     # Standardize features using train statistics
     mean = X_train.mean(axis=0)
@@ -129,7 +122,6 @@ def train_model(
     loss_fn = nn.MSELoss()
 
     # scheduler and early stopping
-    # Some PyTorch builds don't accept the `verbose` kwarg; omit it for compatibility
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min", patience=3, factor=0.5)
     best_val_mse = float("inf")
     best_state: dict | None = None
@@ -137,8 +129,6 @@ def train_model(
 
     use_amp = torch.cuda.is_available()
     # Create a GradScaler in a way that's compatible across torch versions.
-    # Newer versions accept `device_type="cuda"` or a positional 'cuda' arg;
-    # older versions use torch.cuda.amp.GradScaler(). Try several fallbacks.
     scaler = None
     if use_amp:
         try:
@@ -385,7 +375,6 @@ def estimate_required_driver_memory(csv_path: str | Path, sample_lines: int = 10
 def main():
     import os
 
-    # Load config early so we can estimate required driver heap for the input CSV
     cfg = load_config("config.cfg")
     train_csv = cfg.get("train_csv")
 

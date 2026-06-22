@@ -10,8 +10,7 @@ Notes:
 - `main()` writes two CSVs to `prediction_output/`: a float predictions file
     (`predictions_float.csv`) and a rounded-and-capped integer file
     (`predictions_rounded.csv`).
-- This module does not perform psutil-based runtime diagnostics; it focuses
-    on preprocessing and inference.
+- This module focuses on preprocessing and inference.
 """
 from __future__ import annotations
 
@@ -30,9 +29,6 @@ from pyspark.sql import SparkSession
 import pyspark.sql.functions as F
 import tempfile
 import shutil
-
-# No psutil-based runtime diagnostics; file focuses on preprocessing and inference
-
 
 MODEL_PATH = Path("Model/pytorch_mlp.pt")
 
@@ -60,7 +56,6 @@ def get_spark(app_name: str = "spark-pytorch-mlp") -> SparkSession:
 
     # Tuned defaults for a 16-core / 32GB machine; can be overridden via env
     driver_mem = os.environ.get("SPARK_DRIVER_MEMORY", "30g")
-    # executor memory defaults to driver memory when not set explicitly
     exec_mem = os.environ.get("SPARK_EXECUTOR_MEMORY", driver_mem)
     shuffle_parts = os.environ.get("SPARK_SQL_SHUFFLE_PARTITIONS", "16")
     max_result = os.environ.get("SPARK_DRIVER_MAX_RESULT_SIZE", "8g")
@@ -185,7 +180,6 @@ def load_and_preprocess(
         buffer.append(row.asDict())
         if len(buffer) >= batch_size:
             try:
-                # overwrite a single progress line to avoid flooding the console
                 try:
                     print(f"\rProcessing batch: buffered_rows={len(buffer)}", end="", flush=True)
                 except Exception:
@@ -400,8 +394,7 @@ def predict_csv(
     prod_cols = [c for c in ("prod_main_category", "prod_price", "prod_store", "prod_rating_number") if c in df.columns]
     if emb_cols or prod_cols:
         small = df.select(*(emb_cols + prod_cols)).toPandas()
-        # Build new columns in a separate DataFrame then concat once to avoid
-        # fragmenting `pdf` by repeated assignments (PerformanceWarning).
+        # Build new columns in a separate DataFrame then concat once
         small = small.reset_index(drop=True)
         pdf = pdf.reset_index(drop=True)
         add_cols: dict = {}
