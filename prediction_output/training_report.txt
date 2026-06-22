@@ -24,4 +24,18 @@ Epoch 7: time=165.006018s train_rmse=1.1569 val_rmse=1.1784
 Epoch 8: time=165.236174s train_rmse=1.1533 val_rmse=1.1780
 Epoch 9: time=164.966401s train_rmse=1.1441 val_rmse=1.1790
 Epoch 10: time=164.602107s train_rmse=1.1400 val_rmse=1.1809
-Inference: 10000 records, total_time_s=0.090722, avg_time_s=0.000009
+
+Prediction analysis:
+Predictions file: prediction_output\predictions_int.csv
+Total records: 10000
+Mean rating: 4.6471
+Std (population): 0.5966
+
+Distribution (count, percent):
+Rating 1: 0 (0.00%)
+Rating 2: 159 (1.59%)
+Rating 3: 161 (1.61%)
+Rating 4: 2730 (27.30%)
+Rating 5: 6950 (69.50%)
+
+Inference: 10000 records, total_time_s=0.091975, avg_time_s=0.000009

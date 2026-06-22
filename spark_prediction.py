@@ -25,6 +25,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset
+import json
 from pyspark.sql import SparkSession
 import pyspark.sql.functions as F
 import tempfile
@@ -551,6 +552,99 @@ def main():
     print(f"Wrote float predictions to {float_path}")
     if rounded_path:
         print(f"Wrote rounded predictions to {rounded_path}")
+
+    # Run simple analysis on the integer predictions file (or float fallback)
+    def analyze_predictions_file(pred_csv: Path, report_file: Path):
+        try:
+            pdf = pd.read_csv(pred_csv)
+        except Exception as e:
+            raise RuntimeError(f"Failed to read predictions CSV {pred_csv}: {e}")
+        if "rating" not in pdf.columns:
+            raise RuntimeError("Predictions CSV missing 'rating' column")
+
+        ratings = pdf["rating"].astype(float).values
+        mean = float(np.mean(ratings))
+        std = float(np.std(ratings, ddof=0))
+
+        vals, counts = np.unique(ratings.astype(int), return_counts=True)
+        dist = {int(v): int(c) for v, c in zip(vals, counts)}
+        total = int(len(ratings))
+        pct = {k: (v / total) * 100.0 for k, v in dist.items()}
+
+        lines = []
+        lines.append("Prediction analysis:")
+        lines.append(f"Predictions file: {pred_csv}")
+        lines.append(f"Total records: {total}")
+        lines.append(f"Mean rating: {mean:.4f}")
+        lines.append(f"Std (population): {std:.4f}")
+        lines.append("")
+        lines.append("Distribution (count, percent):")
+        for r in range(1, 6):
+            c = dist.get(r, 0)
+            p = pct.get(r, 0.0)
+            lines.append(f"Rating {r}: {c} ({p:.2f}%)")
+
+        text = "\n".join(lines)
+        print(text)
+
+        # Replace any existing prediction analysis block in the report file
+        try:
+            report_file.parent.mkdir(parents=True, exist_ok=True)
+            # read original report (if present) and preserve any 'Inference:' lines
+            if report_file.exists():
+                try:
+                    orig = report_file.read_text(encoding="utf-8")
+                except Exception:
+                    orig = ""
+                orig_lines = orig.splitlines() if orig.strip() else []
+                # extract any Inference lines to preserve timing info
+                inference_lines = [ln for ln in orig_lines if ln.strip().startswith("Inference:")]
+                # remove inference lines from the lines we will search
+                cleaned_lines = [ln for ln in orig_lines if not ln.strip().startswith("Inference:")]
+
+                # find first occurrence of previously written analysis in cleaned lines
+                idx = None
+                for i, ln in enumerate(cleaned_lines):
+                    if ln.strip().startswith("Prediction analysis:"):
+                        idx = i
+                        break
+
+                if idx is not None:
+                    prefix = "\n".join(cleaned_lines[:idx]).rstrip()
+                else:
+                    prefix = "\n".join(cleaned_lines).rstrip()
+
+                parts = []
+                if prefix:
+                    parts.append(prefix)
+                parts.append(text)
+                if inference_lines:
+                    parts.append("\n".join(inference_lines))
+
+                new_text = "\n\n".join(parts).rstrip() + "\n"
+                report_file.write_text(new_text, encoding="utf-8")
+            else:
+                report_file.write_text(text + "\n", encoding="utf-8")
+        except Exception:
+            # don't fail prediction because analysis couldn't be written
+            pass
+
+    try:
+        # prefer configured report_path if provided, otherwise default to training_report.txt
+        configured_report = cp.get("paths", "report_path", fallback=None)
+        if configured_report:
+            report_file = Path(configured_report)
+        else:
+            report_file = out_dir / "training_report.txt"
+
+        if rounded_path and Path(rounded_path).exists():
+            analyze_predictions_file(rounded_path, report_file)
+        else:
+            analyze_predictions_file(float_path, report_file)
+
+        print(f"Updated prediction analysis in {report_file}")
+    except Exception as e:
+        print(f"Prediction analysis failed: {e}")
 
 
 if __name__ == "__main__":
