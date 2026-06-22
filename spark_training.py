@@ -38,11 +38,11 @@ ALLOWED_BERT_COLS = ["comment", "title", "prod_title", "prod_features"]
 
 def train_model(
     data: pd.DataFrame,
-    epochs: int = 30,
+    epochs: int = 100,
     batch_size: int = 64,
-    lr: float = 3e-4,
+    lr: float = 1e-3,
     model_path: Path = MODEL_PATH,
-    weight_decay: float = 1e-5,
+    weight_decay: float = 1e-6,
     early_stopping_patience: int = 5,
 ) -> Tuple[MLP, dict]:
     """Train an `MLP` on the provided tabular DataFrame and return the
@@ -281,10 +281,10 @@ def load_config(path: str | Path) -> dict:
     # Read commonly tuned training parameters and paths with sensible
     # fallbacks to allow running without a complete config file.
     cfg = {}
-    cfg["epochs"] = cp.getint("training", "epochs", fallback=10)
+    cfg["epochs"] = cp.getint("training", "epochs", fallback=100)
     cfg["batch_size"] = cp.getint("training", "batch_size", fallback=64)
     cfg["lr"] = cp.getfloat("training", "lr", fallback=1e-3)
-    cfg["weight_decay"] = cp.getfloat("training", "weight_decay", fallback=1e-5)
+    cfg["weight_decay"] = cp.getfloat("training", "weight_decay", fallback=1e-6)
     cfg["early_stopping_patience"] = cp.getint("training", "early_stopping_patience", fallback=5)
 
     cfg["train_csv"] = cp.get("paths", "train_csv", fallback="training_data/train_merged.csv")

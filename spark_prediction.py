@@ -311,33 +311,36 @@ class TabularDataset(Dataset):
 
 
 class MLP(nn.Module):
-    """Feed-forward MLP used for training and inference.
+    """Deeper feed-forward MLP used for training and inference.
 
-    Architecture: four hidden layers by default (`hidden1`..`hidden4`), each
-    followed by BatchNorm, ReLU and Dropout. The final layer projects to the
-    single output value.
+    Defaults tuned for larger capacity to address underfitting. Uses
+    LayerNorm + SiLU activation and dropout between layers.
     """
-    def __init__(self, input_dim: int, hidden1: int = 128, hidden2: int = 64, hidden3: int = 32, hidden4: int = 16, out: int = 1, dropout: float = 0.2):
+    def __init__(self, input_dim: int, hidden: tuple = (1024, 512, 256, 128, 64), out: int = 1, dropout: float = 0.1, use_layernorm: bool = True):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden1),
-            nn.BatchNorm1d(hidden1),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden1, hidden2),
-            nn.BatchNorm1d(hidden2),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden2, hidden3),
-            nn.BatchNorm1d(hidden3),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden3, hidden4),
-            nn.BatchNorm1d(hidden4),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden4, out),
-        )
+        layers: list[nn.Module] = []
+        prev = input_dim
+        for h in hidden:
+            layers.append(nn.Linear(prev, h))
+            if use_layernorm:
+                layers.append(nn.LayerNorm(h))
+                layers.append(nn.SiLU())
+            else:
+                layers.append(nn.BatchNorm1d(h))
+                layers.append(nn.ReLU())
+            layers.append(nn.Dropout(dropout))
+            prev = h
+
+        layers.append(nn.Linear(prev, out))
+        self.net = nn.Sequential(*layers)
+
+        # He initialization for linear layers
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                try:
+                    nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
+                except Exception:
+                    pass
 
     def forward(self, x):
         return self.net(x)
