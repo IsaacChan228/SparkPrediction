@@ -1,12 +1,17 @@
 """Training driver: Spark preprocessing + PyTorch MLP training.
 
-This module loads cleaned training data via a Spark session, performs
-light feature engineering (numeric sanitization, optional precomputed
-embeddings), and trains a small PyTorch MLP regressor for the ``rating``
-target. Trained artifacts are saved to `Model/pytorch_mlp.pt` and a
-simple training report is written to the configured report path.
+Loads cleaned training data via a Spark session, performs light feature
+engineering (numeric sanitization, optional precomputed embeddings), and
+trains a small PyTorch MLP regressor for the ``rating`` target.
 
-Prediction functionality is implemented in `spark_prediction.py`.
+Features:
+- Streaming-safe preprocessing via `load_and_preprocess()`.
+- Heuristic driver memory estimation via `estimate_required_driver_memory()`.
+- Trained artifacts saved to `Model/pytorch_mlp.pt` and a simple training
+    report written to the configured report path.
+
+This driver does not perform psutil-based runtime diagnostics; use the
+estimator and Spark config prints for tuning.
 """
 
 from __future__ import annotations
@@ -27,7 +32,6 @@ from spark_prediction import (
     load_and_preprocess,
     TabularDataset,
     MLP,
-    log_memory_snapshot,
 )
 
 # Enforce these text columns must be represented by embeddings
@@ -53,7 +57,7 @@ def train_model(
     print("Preparing training data...")
     # Only accept precomputed numeric embedding columns named '<col>_emb_<i>'
     bert_cols = ALLOWED_BERT_COLS
-    feature_cols = ["votes", "purchased", "time"]
+        # propagate exception; no runtime diagnostic capture here
 
     # Detect numeric embedding columns stored in the dataframe
     emb_cols_detected: list[str] = []
@@ -81,7 +85,9 @@ def train_model(
     X = data[feature_cols].astype(np.float32).values
     y = data["label"].astype(np.float32).values
 
-    # Diagnostics removed to reduce noisy output
+    # No runtime diagnostic printouts; use the
+    # `estimate_required_driver_memory()` helper and SPARK_* env vars to tune
+    # JVM heap sizes when necessary.
 
     # 80/20 train/validation split
     n = len(y)
@@ -431,22 +437,8 @@ def main():
     # measure preprocessing time
     print(f"Preprocessing input CSV: {train_csv}")
     pre_start = time.perf_counter()
-    try:
-        try:
-            log_memory_snapshot("before_load_and_preprocess")
-        except Exception:
-            pass
-        df = load_and_preprocess(spark, train_csv)
-        try:
-            log_memory_snapshot("after_load_and_preprocess")
-        except Exception:
-            pass
-    except Exception:
-        try:
-            log_memory_snapshot("load_and_preprocess_failed")
-        except Exception:
-            pass
-        raise
+    # run preprocessing
+    df = load_and_preprocess(spark, train_csv)
     # Reduce dataframe to only feature + label columns to minimize driver memory
     # Detect embedding columns and product feature cols, mirror train_model logic
     bert_cols = ALLOWED_BERT_COLS

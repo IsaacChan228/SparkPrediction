@@ -35,5 +35,3 @@ torchaudio
 
 # sentence-transformers is used for the BERT encoding.
 sentence-transformers>=2.2.2
-
-psutil

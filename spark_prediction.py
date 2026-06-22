@@ -1,9 +1,17 @@
 """Prediction helpers: Spark preprocessing, model I/O, and CSV inference.
 
-This module contains utilities to create a Spark session, preprocess CSV
-inputs into numeric features compatible with the training pipeline, load the
-trained PyTorch MLP, and run batch inference producing a pandas DataFrame of
-predicted `rating` values.
+Utilities to create a Spark session, preprocess CSV inputs into numeric
+features compatible with the training pipeline, load the trained PyTorch
+MLP, and run batch inference producing a pandas DataFrame of predicted
+`rating` values.
+
+Notes:
+- `predict_csv()` returns floating-point predictions in the `rating` column.
+- `main()` writes two CSVs to `prediction_output/`: a float predictions file
+    (`predictions_float.csv`) and a rounded-and-capped integer file
+    (`predictions_rounded.csv`).
+- This module does not perform psutil-based runtime diagnostics; it focuses
+    on preprocessing and inference.
 """
 from __future__ import annotations
 
@@ -23,87 +31,7 @@ import pyspark.sql.functions as F
 import tempfile
 import shutil
 
-# Optional diagnostics helper: use psutil when available to inspect process memory
-try:
-    import psutil
-    _PSUTIL_AVAILABLE = True
-except Exception:
-    psutil = None
-    _PSUTIL_AVAILABLE = False
-
-
-def log_memory_snapshot(tag: str = "") -> dict:
-    """Log a short memory snapshot for the Python process and any Java processes.
-
-    Returns a dict with basic diagnostics.
-    """
-    info = {"tag": tag, "python_pid": os.getpid(), "timestamp": time.time()}
-    try:
-        if _PSUTIL_AVAILABLE:
-            p = psutil.Process(os.getpid())
-            info["python_rss_bytes"] = p.memory_info().rss
-            # collect java processes (likely the Spark JVM)
-            java_procs = []
-            for proc in psutil.process_iter(["pid", "name", "cmdline", "memory_info"]):
-                try:
-                    name = (proc.info.get("name") or "").lower()
-                    cmd = " ".join(proc.info.get("cmdline") or [])
-                    if "java" in name or "java" in cmd:
-                        mi = proc.info.get("memory_info")
-                        rss = mi.rss if mi is not None else None
-                        java_procs.append({"pid": proc.info.get("pid"), "name": name, "cmdline": cmd, "rss": rss})
-                except Exception:
-                    continue
-            # sort by rss desc
-            java_procs = sorted(java_procs, key=lambda x: x.get("rss") or 0, reverse=True)
-            info["java_processes"] = java_procs[:5]
-        else:
-            info["warning"] = "psutil not available; install psutil for richer diagnostics"
-    except Exception as e:
-        info["error"] = str(e)
-
-    # diagnostics collected in `info`; printing disabled to silence output
-
-    return info
-
-
-def log_java_xmx(tag: str = "") -> dict:
-    """Detect java processes and print their -Xmx settings when available."""
-    info = {"tag": tag, "timestamp": time.time(), "java_xmx": []}
-    if not _PSUTIL_AVAILABLE:
-        print(f"[JAVA-XMX] {tag}: psutil not available; cannot inspect java cmdline")
-        return info
-
-    import shlex
-    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
-        try:
-            name = (proc.info.get("name") or "").lower()
-            cmdline_list = proc.info.get("cmdline") or []
-            cmd = " ".join(cmdline_list)
-            if "java" not in name and "java" not in cmd:
-                continue
-            # look for -Xmx value in the joined commandline
-            m = re.search(r"-Xmx(\d+)([kKmMgG]?)", cmd)
-            xmx_raw = m.group(0) if m else None
-            xmx_bytes = None
-            if m:
-                val = int(m.group(1))
-                unit = m.group(2).lower()
-                if unit == "g":
-                    xmx_bytes = val * 1024 ** 3
-                elif unit == "m":
-                    xmx_bytes = val * 1024 ** 2
-                elif unit == "k":
-                    xmx_bytes = val * 1024
-                else:
-                    xmx_bytes = val
-            info["java_xmx"].append({"pid": proc.info.get("pid"), "cmd": cmd[:200], "xmx_raw": xmx_raw, "xmx_bytes": xmx_bytes})
-        except Exception:
-            continue
-
-    # summary stored in `info`; printing disabled to avoid noisy stdout
-
-    return info
+# No psutil-based runtime diagnostics; file focuses on preprocessing and inference
 
 
 MODEL_PATH = Path("Model/pytorch_mlp.pt")
@@ -148,15 +76,7 @@ def get_spark(app_name: str = "spark-pytorch-mlp") -> SparkSession:
     )
 
     spark = builder.getOrCreate()
-    # snapshot memory after Spark session is created
-    try:
-        log_memory_snapshot("post_get_spark")
-    except Exception:
-        pass
-    try:
-        log_java_xmx("post_get_spark")
-    except Exception:
-        pass
+    # no runtime snapshot here; print configured Spark settings below
     try:
         configured = spark.conf.get("spark.driver.memory")
     except Exception:
@@ -260,18 +180,20 @@ def load_and_preprocess(
     tmpdir = tempfile.mkdtemp(prefix="spark_parts_")
     merged_path = os.path.join(tmpdir, "merged_parts.csv")
     first_write = True
-    # diagnostic snapshot before iterating rows from the JVM
+    # stream rows in batches from the JVM and write processed batches to disk
     for row in it:
         buffer.append(row.asDict())
         if len(buffer) >= batch_size:
             try:
-                print(f"Processing batch: buffered_rows={len(buffer)}")
+                # overwrite a single progress line to avoid flooding the console
+                try:
+                    print(f"\rProcessing batch: buffered_rows={len(buffer)}", end="", flush=True)
+                except Exception:
+                    # fallback to plain print if terminal doesn't support carriage returns
+                    print(f"Processing batch: buffered_rows={len(buffer)}")
                 part = pd.DataFrame(buffer)
             except Exception:
-                try:
-                    log_memory_snapshot("error_creating_part")
-                except Exception:
-                    pass
+                # propagate exception; no runtime diagnostic capture
                 raise
             # coerce types for embeddings and product cols
             for c in emb_cols:
@@ -291,10 +213,7 @@ def load_and_preprocess(
                 part.to_csv(merged_path, mode="a", header=first_write, index=False)
                 first_write = False
             except Exception:
-                try:
-                    log_memory_snapshot("error_writing_part_to_disk")
-                except Exception:
-                    pass
+                # propagate exception; no runtime diagnostic capture
                 raise
 
             # clear buffer and free part
@@ -318,12 +237,15 @@ def load_and_preprocess(
             part.to_csv(merged_path, mode="a", header=first_write, index=False)
             first_write = False
         except Exception:
-            try:
-                log_memory_snapshot("error_writing_last_part_to_disk")
-            except Exception:
-                pass
+            # propagate exception; no runtime diagnostic capture
             raise
         del part
+
+    # finish progress line and move to next line
+    try:
+        print("", flush=True)
+    except Exception:
+        pass
 
     # If we wrote a merged CSV to disk, read it back efficiently with explicit dtypes
     try:
@@ -395,6 +317,12 @@ class TabularDataset(Dataset):
 
 
 class MLP(nn.Module):
+    """Feed-forward MLP used for training and inference.
+
+    Architecture: four hidden layers by default (`hidden1`..`hidden4`), each
+    followed by BatchNorm, ReLU and Dropout. The final layer projects to the
+    single output value.
+    """
     def __init__(self, input_dim: int, hidden1: int = 128, hidden2: int = 64, hidden3: int = 32, hidden4: int = 16, out: int = 1, dropout: float = 0.2):
         super().__init__()
         self.net = nn.Sequential(
