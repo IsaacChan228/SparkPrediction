@@ -1,6 +1,6 @@
-Preprocessing time (s): 600.812535
-Total training time (s): 2383.523345
-Offline total time (preprocessing + training) (s): 2984.335881
+Preprocessing time (s): 630.654045
+Total training time (s): 1176.791913
+Offline total time (preprocessing + training) (s): 1807.445959
 
 Rating distribution (count, percent):
 Rating 1: 348555 (11.59%)
@@ -14,27 +14,33 @@ Mean: 3.9412
 SD: 1.4219
 
 Per-epoch timing and metrics:
-Epoch 1: time=265.647130s train_rmse=1.2015 val_rmse=1.1888
-Epoch 2: time=265.084058s train_rmse=1.1812 val_rmse=1.1782
-Epoch 3: time=264.646846s train_rmse=1.1732 val_rmse=1.1751
-Epoch 4: time=265.187737s train_rmse=1.1665 val_rmse=1.1739
-Epoch 5: time=264.250518s train_rmse=1.1594 val_rmse=1.1748
-Epoch 6: time=264.266256s train_rmse=1.1514 val_rmse=1.1773
-Epoch 7: time=263.945914s train_rmse=1.1426 val_rmse=1.1815
-Epoch 8: time=263.916945s train_rmse=1.1332 val_rmse=1.1842
-Epoch 9: time=266.523971s train_rmse=1.1128 val_rmse=1.1925
+Epoch 1: time=81.074234s train_rmse=1.2066 val_rmse=1.1877
+Epoch 2: time=79.290018s train_rmse=1.1839 val_rmse=1.1792
+Epoch 3: time=77.950120s train_rmse=1.1752 val_rmse=1.1784
+Epoch 4: time=78.558610s train_rmse=1.1680 val_rmse=1.1768
+Epoch 5: time=79.702501s train_rmse=1.1609 val_rmse=1.1767
+Epoch 6: time=79.825719s train_rmse=1.1536 val_rmse=1.1783
+Epoch 7: time=77.990523s train_rmse=1.1458 val_rmse=1.1811
+Epoch 8: time=78.267841s train_rmse=1.1373 val_rmse=1.1823
+Epoch 9: time=77.988399s train_rmse=1.1284 val_rmse=1.1861
+Epoch 10: time=78.104741s train_rmse=1.1084 val_rmse=1.1941
+Epoch 11: time=77.453076s train_rmse=1.0974 val_rmse=1.2069
+Epoch 12: time=77.494835s train_rmse=1.0884 val_rmse=1.2048
+Epoch 13: time=77.388695s train_rmse=1.0801 val_rmse=1.2157
+Epoch 14: time=77.336076s train_rmse=1.0644 val_rmse=1.2198
+Epoch 15: time=78.307702s train_rmse=1.0571 val_rmse=1.2211
 
 Prediction analysis:
 Predictions file: prediction_output\predictions_int.csv
 Total records: 10000
-Mean rating: 3.9520
-Std (population): 0.2780
+Mean rating: 3.9818
+Std (population): 0.3321
 
 Distribution (count, percent):
 Rating 1: 0 (0.00%)
-Rating 2: 158 (1.58%)
-Rating 3: 164 (1.64%)
-Rating 4: 9678 (96.78%)
-Rating 5: 0 (0.00%)
+Rating 2: 170 (1.70%)
+Rating 3: 134 (1.34%)
+Rating 4: 9404 (94.04%)
+Rating 5: 292 (2.92%)
 
-Inference: 10000 records, total_time_s=0.094250, avg_time_s=0.000009
+Inference: 10000 records, total_time_s=0.087336, avg_time_s=0.000009
