@@ -10,11 +10,11 @@ product is found for a left row, all `prod_` columns for that row are set to
 the literal string "NA". When multiple product_info rows share the same
 `parent_prod_id`, the first-seen product row is used.
 
-This merge step also computes BERT sentence-transformer embeddings for
-text columns (title, comment, product title, product features) and expands
-those embeddings into numeric columns named like `<col>_emb_0`,
-`<col>_emb_1`, ... so downstream training and prediction consume numeric
-features only.
+This merge step also computes sentence-transformer embeddings using
+`all-MiniLM-L6-v2` for text columns (title, comment, product title,
+product features) and expands those embeddings into numeric columns named
+like `<col>_emb_0`, `<col>_emb_1`, ... so downstream training and
+prediction consume numeric features only.
 
 API:
 - `merge_train_with_prod(..., use_prediction: bool = True)` performs the
@@ -112,8 +112,9 @@ def merge_train_with_prod(
 
         out_rows.append(out_row)
 
-    # Compute BERT embeddings on the merged data and expand into numeric columns
-    # (embeddings are computed during merge and written as numeric fields)
+    # Compute sentence-transformer embeddings on the merged data and expand
+    # them into numeric columns (embeddings are computed during merge and
+    # written as numeric fields)
     emb_fieldnames: List[str] = []
 
     if bert_cols is None:

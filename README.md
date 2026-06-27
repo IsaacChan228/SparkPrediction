@@ -7,7 +7,7 @@ SparkPrediction is a Spark + PyTorch rating prediction pipeline. It cleans the r
 | Component | Role in the code | Model structure / output |
 | --- | --- | --- |
 | Spark | Cleans CSVs, merges training and prediction data, sanitizes numeric fields, and streams data into pandas batches. | Produces numeric tabular rows for training and inference. |
-| BERT | `sentence-transformers` generates embeddings for `comment`, `title`, `prod_title`, and `prod_features` during the merge step. | Each text column becomes compressed embedding features named like `<column>_emb_<index>`. |
+| Sentence-transformer embeddings | `sentence-transformers` with `all-MiniLM-L6-v2` generates embeddings for `comment`, `title`, `prod_title`, and `prod_features` during the merge step. | Each text column becomes compressed embedding features named like `<column>_emb_<index>`. |
 | PyTorch | Trains and serves the regressor used for rating prediction. | `MLP(input_dim, hidden=(4096, 2048, 2048, 1024, 512, 256, 128, 64))` with LayerNorm, SiLU, Dropout, and a final linear output layer. |
 
 ## Requirements
