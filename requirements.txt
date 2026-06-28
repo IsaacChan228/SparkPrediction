@@ -33,5 +33,5 @@ torch
 torchvision
 torchaudio
 
-# sentence-transformers is used for the BERT encoding.
+# sentence-transformers is used for the textual encoding.
 sentence-transformers>=2.2.2
